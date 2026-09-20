@@ -11,24 +11,40 @@
 // documented here):
 //   - A session is created with status 'running' the first time a user
 //     starts the clarification loop on a branch they don't already have a
-//     non-terminal (queued/running) session on.
+//     non-terminal (awaiting_approval/queued/running) session on.
 //   - Opening the loop again while a non-terminal session already exists
 //     reuses it rather than creating a new row (see startOrResumeSession).
-//   - 'running' -> 'queued' once every session_requirements row for the
-//     session has left 'pending_confirm' (i.e. is 'confirmed_proceed' or
-//     'confirmed_skip') AND at least one is 'confirmed_proceed'. 'queued'
-//     means "ready for Phase 4's sandbox pickup" - Phase 4 doesn't exist
-//     yet, so a queued session just sits there.
-//   - This sync is bidirectional (see syncSessionStatus): if a queued
-//     session later gains a new pending_confirm requirement (the user adds
-//     more instructions after already being queued), it flips back to
-//     'running'. Nothing consumes 'queued' yet, so this can't race a live
-//     Phase 4 worker - it exists purely so 'queued' keeps meaning "actually
-//     ready" rather than "was ready once."
+//   - 'running' -> 'awaiting_approval' once every session_requirements row
+//     for the session has left 'pending_confirm' (i.e. is
+//     'confirmed_proceed' or 'confirmed_skip') AND at least one is
+//     'confirmed_proceed'. This is a human gate, not an automatic one: the
+//     session sits in 'awaiting_approval' - showing an "Approve & Implement"
+//     button - until the session's owner explicitly approves it (see
+//     approveSession). Only that explicit action sets 'queued', which is
+//     what worker.js actually polls for pickup.
+//   - This running/awaiting_approval sync is bidirectional and fully
+//     automatic (see syncSessionStatus): if the requirement set stops being
+//     "fully resolved with at least one proceed" (the user adds more
+//     instructions, or a new pending_confirm shows up from an overlap
+//     check), it flips back to 'running'. Getting back to 'queued' after
+//     that always requires a fresh, explicit approval - approval is never
+//     "locked in" once given, but it's also never assumed; re-approving is
+//     just one more click, not a separate "revoke" step.
+//   - 'queued' -> 'running' happens two ways: worker.js's atomic claim (see
+//     claimNextQueuedSession) once the pipeline actually starts executing,
+//     or this module demoting it back down (same bidirectional sync as
+//     above) if new unresolved work shows up before the worker gets to it.
+//     Once a pipeline_runs row exists for the session with status
+//     'running' (i.e. the worker has already claimed and started it),
+//     syncSessionStatus leaves status alone entirely - see
+//     hasActivePipelineRun - since at that point 'running' means "actively
+//     executing," not "still gathering approval," and must not be
+//     reinterpreted as the latter just because a user sends a stray
+//     message. postMessage() rejects new messages for that same reason.
 //   - 'completed'/'failed' are terminal and out of this module's control -
-//     they belong to Phase 4/5's pipeline execution, which doesn't exist
-//     yet. A terminal session is never resumed; a fresh one is started
-//     instead (see startOrResumeSession).
+//     they belong to Phase 4/5's pipeline execution. A terminal session is
+//     never resumed; a fresh one is started instead (see
+//     startOrResumeSession).
 
 const db = require('../db');
 const logger = require('../logger');
@@ -168,9 +184,20 @@ async function runChatTurn({ session, repo, coNumber, actingUserId, messages, pe
 
 // --- session status sync -----------------------------------------------------
 
+// True once worker.js has claimed this session and pipelineService has
+// started executing it (see pipelineService.js's createPipelineRun, called
+// before any other pipeline work). This is the one reliable way to tell
+// the two meanings of a 'running' session status apart from the sessions
+// row alone - see the state-machine comment above.
+async function hasActivePipelineRun(sessionId) {
+  const rows = await db.query(`SELECT 1 FROM pipeline_runs WHERE session_id = ? AND status = 'running' LIMIT 1`, [sessionId]);
+  return rows.length > 0;
+}
+
 async function syncSessionStatus(sessionId) {
   const session = await getSessionById(sessionId);
   if (!session || session.status === 'completed' || session.status === 'failed') return;
+  if (await hasActivePipelineRun(sessionId)) return;
 
   const rows = await db.query(
     `SELECT
@@ -181,8 +208,17 @@ async function syncSessionStatus(sessionId) {
     [sessionId]
   );
   const { pendingCount, proceedCount, total } = rows[0];
-  const readyForQueue = Number(total) > 0 && Number(pendingCount) === 0 && Number(proceedCount) > 0;
-  const nextStatus = readyForQueue ? 'queued' : 'running';
+  const isReady = Number(total) > 0 && Number(pendingCount) === 0 && Number(proceedCount) > 0;
+
+  // 'queued' means the owner already approved this exact ready state. Never
+  // auto-promote INTO 'queued' here - that's approveSession's job alone.
+  // Only demote out of it, and only if it's no longer actually ready.
+  let nextStatus;
+  if (session.status === 'queued') {
+    nextStatus = isReady ? 'queued' : 'running';
+  } else {
+    nextStatus = isReady ? 'awaiting_approval' : 'running';
+  }
 
   if (nextStatus !== session.status) {
     await db.query('UPDATE sessions SET status = ? WHERE id = ?', [nextStatus, sessionId]);
@@ -356,6 +392,13 @@ async function postMessage({ session, repo, branch, actingUserId, message }) {
   if (session.status === 'completed' || session.status === 'failed') {
     throw makeError('This session has already finished and cannot accept new messages', 'SESSION_TERMINAL');
   }
+  // A 'running' session is ambiguous by status alone (see the state-machine
+  // comment above) - it's either still mid-chat, or the worker has already
+  // claimed it and is actively executing. Only the latter needs blocking
+  // here; hasActivePipelineRun is what tells them apart.
+  if (session.status === 'running' && (await hasActivePipelineRun(session.id))) {
+    throw makeError('This session is currently being implemented and cannot accept new messages', 'SESSION_TERMINAL');
+  }
 
   // Prior visible turns only (user/assistant) - the overlap check's
   // system-role turn is intentionally excluded from what's replayed back
@@ -418,6 +461,34 @@ async function resolveRequirement({ session, requirementId, resolution, actingUs
   await syncSessionStatus(session.id);
 
   return { ...requirement, resolutionStatus: resolution };
+}
+
+// The one explicit human gate between clarification and worker.js's pickup
+// - see the state-machine comment above. Deliberately re-reads the session
+// and re-derives readiness rather than trusting the caller's (possibly
+// stale) `session` object, since the page could have been open a while;
+// the conditional UPDATE below is the actual race guard, this is just what
+// produces a clear error instead of a silent no-op.
+async function approveSession({ session, actingUserId }) {
+  if (actingUserId !== session.userId) {
+    throw makeError('Only the session owner can approve it', 'FORBIDDEN');
+  }
+
+  const current = await getSessionById(session.id);
+  if (!current || current.status !== 'awaiting_approval') {
+    throw makeError(
+      `Session is not awaiting approval (current status: ${current ? current.status : 'not found'})`,
+      'INVALID_STATE'
+    );
+  }
+
+  const result = await db.query(`UPDATE sessions SET status = 'queued' WHERE id = ? AND status = 'awaiting_approval'`, [session.id]);
+  if (result.affectedRows !== 1) {
+    throw makeError('Session status changed before approval could be applied - refresh and try again', 'INVALID_STATE');
+  }
+
+  logger.info('session approved for implementation', { sessionId: session.id, actingUserId });
+  return getSessionById(session.id);
 }
 
 // --- read views ---------------------------------------------------------------
@@ -505,6 +576,7 @@ module.exports = {
   startOrResumeSession,
   postMessage,
   resolveRequirement,
+  approveSession,
   getSessionDetail,
   // Reused as-is by Phase 4's app/lib/pipeline/pipelineService.js for its two
   // system-triggered model calls (file-selection, code-changes), so every

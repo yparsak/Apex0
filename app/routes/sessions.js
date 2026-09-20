@@ -178,4 +178,21 @@ router.post('/:sessionId/requirements/:requirementId/resolve', async (req, res) 
   }
 });
 
+router.post('/:sessionId/approve', async (req, res) => {
+  const ctx = await loadRepoAndBranch(req, res);
+  if (!ctx) return undefined;
+  const session = await loadOwnedSession(req, res, ctx.branch.id);
+  if (!session) return undefined;
+
+  try {
+    const updated = await sessionService.approveSession({ session, actingUserId: req.session.user.id });
+    return sendSuccess(res, { session: updated }, 'Session approved for implementation');
+  } catch (err) {
+    if (err.code === 'INVALID_STATE') return sendFailure(res, 409, err.message, { code: err.code });
+    if (err.code === 'FORBIDDEN') return sendFailure(res, 403, err.message, { code: err.code });
+    logger.error('approve session failed', { sessionId: session.id, error: err.message });
+    return sendFailure(res, 500, 'Failed to approve session', { code: 'INTERNAL_ERROR' });
+  }
+});
+
 module.exports = router;

@@ -71,12 +71,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   user_id INT UNSIGNED NOT NULL,
   branch_id INT UNSIGNED NOT NULL,
-  status ENUM('queued', 'running', 'completed', 'failed') NOT NULL DEFAULT 'queued',
+  status ENUM('awaiting_approval', 'queued', 'running', 'completed', 'failed') NOT NULL DEFAULT 'queued',
   completed_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (branch_id) REFERENCES branches(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 'awaiting_approval' added for the explicit human approval gate (see
+-- sessionService.js's state-machine comment) - MODIFY COLUMN is idempotent,
+-- safe to re-apply against an already-provisioned dev database exactly like
+-- this schema's other additive statements.
+ALTER TABLE sessions MODIFY COLUMN status ENUM('awaiting_approval', 'queued', 'running', 'completed', 'failed') NOT NULL DEFAULT 'queued';
 
 CREATE TABLE IF NOT EXISTS session_requirements (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

@@ -27,6 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const pendingList = document.getElementById('pending-requirements');
   const finalizedPanel = document.getElementById('finalized-panel');
   const finalizedList = document.getElementById('finalized-requirements');
+  const approvePanel = document.getElementById('approve-panel');
+  const approveBtn = document.getElementById('approve-btn');
   const otherSessionsEl = document.getElementById('other-sessions');
   const pipelinePanel = document.getElementById('pipeline-panel');
   const pipelineStatusBadge = document.getElementById('pipeline-status-badge');
@@ -49,13 +51,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function statusVariant(status) {
-    return { queued: 'info', running: 'secondary', completed: 'success', failed: 'danger' }[status] || 'secondary';
+    return (
+      { awaiting_approval: 'warning', queued: 'info', running: 'secondary', completed: 'success', failed: 'danger' }[status] ||
+      'secondary'
+    );
   }
 
   function renderStatusBanner(status) {
-    if (status === 'queued') {
+    if (status === 'awaiting_approval') {
+      statusBanner.className = 'alert alert-warning';
+      statusBanner.textContent = 'All requirements resolved - review them and click "Approve & Implement" to proceed.';
+    } else if (status === 'queued') {
       statusBanner.className = 'alert alert-success';
-      statusBanner.textContent = 'All requirements resolved - this session is queued for pickup.';
+      statusBanner.textContent = 'Approved - this session is queued for pickup.';
     } else {
       statusBanner.className = `alert alert-${statusVariant(status)}`;
       statusBanner.textContent = `Session status: ${status}`;
@@ -122,6 +130,26 @@ document.addEventListener('DOMContentLoaded', () => {
         </li>`;
       })
       .join('');
+  }
+
+  // Shown only in 'awaiting_approval' - hidden the moment the owner
+  // approves (-> 'queued') or adds more chat that reopens the session
+  // (-> 'running'), so there's no separate "revoke" step, per design: the
+  // button just naturally reappears once things are resolved again.
+  function renderApprovePanel(status) {
+    approvePanel.classList.toggle('d-none', status !== 'awaiting_approval');
+  }
+
+  // A 'running' session with an in-progress pipeline run means the worker
+  // has already claimed it - chat must not be usable at that point (see
+  // sessionService.postMessage's matching server-side check).
+  function renderChatAvailability(status, pipelineRun) {
+    const implementing = status === 'running' && pipelineRun && pipelineRun.status === 'running';
+    messageInput.disabled = implementing;
+    sendBtn.disabled = implementing;
+    messageInput.placeholder = implementing
+      ? 'This session is being implemented and can no longer accept messages.'
+      : "Describe what you need, or answer the agent's question...";
   }
 
   function renderOtherSessions(otherSessions) {
@@ -225,6 +253,8 @@ document.addEventListener('DOMContentLoaded', () => {
     renderStatusBanner(detail.session.status);
     renderTranscript(detail.conversations);
     renderRequirements(detail.requirements);
+    renderApprovePanel(detail.session.status);
+    renderChatAvailability(detail.session.status, detail.pipelineRun);
     renderOtherSessions(detail.otherSessions);
     renderPipeline(detail.pipelineRun, detail.repo, detail.branch, detail.requirementsLogPath);
     schedulePolling(detail.session.status);
@@ -275,6 +305,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  async function approveSession() {
+    hideError();
+    approveBtn.disabled = true;
+    try {
+      await window.ApexApi.post(`${basePath}/${sessionId}/approve`);
+      await refreshSession();
+    } catch (err) {
+      showError(err.message || 'Failed to approve session');
+    } finally {
+      approveBtn.disabled = false;
+    }
+  }
+
+  approveBtn.addEventListener('click', approveSession);
   sendBtn.addEventListener('click', sendMessage);
   messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
