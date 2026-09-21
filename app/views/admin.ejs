@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apex &mdash; Admin</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <%- include('partials/header', { user }) %>
+  <div class="container">
+    <p><a href="/repos">&larr; Back to repositories</a></p>
+    <h1 class="mb-4">Access administration</h1>
+
+    <div id="admin-error" class="alert alert-danger d-none"></div>
+    <div id="admin-success" class="alert alert-success d-none"></div>
+
+    <h2 class="h4">Users</h2>
+    <p class="text-muted">Edit a user's initials (used to name their branches, e.g. <code>dev/{initials}-{CO}-{n}</code>).</p>
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Initials</th>
+          <th>Admin</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="user-rows">
+        <tr><td colspan="4" class="text-muted">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+
+    <h2 class="h4 mt-5">Grant repo-group access</h2>
+    <div class="row g-2 mb-3">
+      <div class="col-md-4">
+        <label for="grant-user-select" class="form-label">User</label>
+        <select id="grant-user-select" class="form-select">
+          <option value="">Loading&hellip;</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label for="grant-repo-group-select" class="form-label">Repo group</label>
+        <select id="grant-repo-group-select" class="form-select">
+          <option value="">Loading&hellip;</option>
+        </select>
+      </div>
+      <div class="col-md-2 align-self-end">
+        <button id="grant-btn" type="button" class="btn btn-primary w-100">Grant</button>
+      </div>
+    </div>
+
+    <h2 class="h4 mt-5">Current access</h2>
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Org</th>
+          <th>Repo group</th>
+          <th>Granted</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="permission-rows">
+        <tr><td colspan="5" class="text-muted">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <script src="/js/api-client.js"></script>
+  <script src="/js/dom-utils.js"></script>
+  <script src="/js/nav.js"></script>
+  <script src="/js/admin.js"></script>
+</body>
+</html>

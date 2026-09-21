@@ -175,3 +175,33 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 -- CREATE-TABLE-IF-NOT-EXISTS discipline for a case where the table itself
 -- already exists.
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS spec_doc_path VARCHAR(500) NULL AFTER commit_sha;
+
+-- Phase 6: access administration. `is_admin` gates the admin UI/API (see
+-- app/lib/auth/requireAdmin.js) and is carried on the session alongside
+-- `username`/`initials` (see app/lib/auth/localPasswordAuthProvider.js) so a
+-- request doesn't need a fresh DB lookup to check it. Defaults to 0 so every
+-- pre-Phase-6 user stays a non-admin until promoted by hand or via
+-- `make seed-admin` (see scripts/seed-admin.js). Additive via
+-- `ADD COLUMN IF NOT EXISTS`, same discipline as spec_doc_path above.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin TINYINT(1) NOT NULL DEFAULT 0;
+
+-- Phase 6: append-only record of every admin mutation (permission
+-- grant/revoke, initials edit), per roadmap.md's "itself audit-logged"
+-- requirement for the Phase 6 admin UI. Deliberately a separate table from
+-- `audit_log` rather than reusing it: `audit_log`'s shape
+-- (raw_instructions/qa_history, repo_id/co_number) is specific to the AI
+-- Q&A pipeline (Phases 3-5), and none of that fits an admin action - same
+-- "separate, normalized table per concern" discipline session_requirements/
+-- conversations/audit_log already follow relative to `sessions`.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  admin_user_id INT UNSIGNED NOT NULL,
+  action VARCHAR(50) NOT NULL,
+  target_user_id INT UNSIGNED NULL,
+  repo_group_id INT UNSIGNED NULL,
+  detail TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (admin_user_id) REFERENCES users(id),
+  FOREIGN KEY (target_user_id) REFERENCES users(id),
+  FOREIGN KEY (repo_group_id) REFERENCES repo_groups(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -22,12 +22,14 @@ class LocalPasswordAuthProvider extends AuthProvider {
       [username, passwordHash, initials]
     );
 
-    return { id: result.insertId, username, initials };
+    // is_admin defaults to 0 (see db/schema.sql) - every self-registered
+    // user starts as a non-admin, so this is hardcoded rather than read back.
+    return { id: result.insertId, username, initials, isAdmin: false };
   }
 
   async verify(username, password) {
     const rows = await db.query(
-      'SELECT id, username, password_hash, initials FROM users WHERE username = ?',
+      'SELECT id, username, password_hash, initials, is_admin AS isAdmin FROM users WHERE username = ?',
       [username]
     );
     if (rows.length === 0) return null;
@@ -36,7 +38,7 @@ class LocalPasswordAuthProvider extends AuthProvider {
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) return null;
 
-    return { id: user.id, username: user.username, initials: user.initials };
+    return { id: user.id, username: user.username, initials: user.initials, isAdmin: Boolean(user.isAdmin) };
   }
 }
 

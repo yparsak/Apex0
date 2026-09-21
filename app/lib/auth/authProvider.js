@@ -13,11 +13,14 @@
 // active provider returns/throws.
 class AuthProvider {
   /**
-   * Create a new local identity.
+   * Create a new local identity. Always starts as a non-admin - see
+   * app/lib/auth/requireAdmin.js; promoting to admin is Phase 6's
+   * scripts/seed-admin.js or an existing admin's own judgment, never
+   * self-service at registration time.
    * @param {string} username
    * @param {string} password
    * @param {string} initials
-   * @returns {Promise<{id: number, username: string, initials: string}>}
+   * @returns {Promise<{id: number, username: string, initials: string, isAdmin: boolean}>}
    */
   async register(_username, _password, _initials) {
     throw new Error('AuthProvider.register() is not implemented');
@@ -27,7 +30,7 @@ class AuthProvider {
    * Verify credentials.
    * @param {string} username
    * @param {string} password
-   * @returns {Promise<{id: number, username: string, initials: string} | null>} null when invalid
+   * @returns {Promise<{id: number, username: string, initials: string, isAdmin: boolean} | null>} null when invalid
    */
   async verify(_username, _password) {
     throw new Error('AuthProvider.verify() is not implemented');

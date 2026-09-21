@@ -21,6 +21,21 @@ function requirePageAuth(req, res, next) {
   return next();
 }
 
+// Phase 6: same redirect-to-/login guard as requirePageAuth above, plus a
+// redirect-to-/repos fallback for a non-admin who navigates to /admin
+// directly - a browser should land somewhere useful, not see a raw
+// {success:false} JSON body, matching this file's stated auth-guard
+// convention for every other page route.
+function requireAdminPage(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.redirect('/login');
+  }
+  if (!req.session.user.isAdmin) {
+    return res.redirect('/repos');
+  }
+  return next();
+}
+
 router.get('/', (req, res) => res.redirect('/login'));
 
 router.get('/login', (req, res) => {
@@ -46,6 +61,10 @@ router.get('/repos/:repoId/branches/:branchId/session', requirePageAuth, (req, r
     return res.redirect('/repos');
   }
   return res.render('session', { user: req.session.user, repoId, branchId });
+});
+
+router.get('/admin', requireAdminPage, (req, res) => {
+  res.render('admin', { user: req.session.user });
 });
 
 module.exports = router;
