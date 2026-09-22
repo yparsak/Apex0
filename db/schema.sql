@@ -205,3 +205,50 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
   FOREIGN KEY (target_user_id) REFERENCES users(id),
   FOREIGN KEY (repo_group_id) REFERENCES repo_groups(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Phase 7: "blocked-allowlist attempt" alerting (see roadmap.md's Phase 7
+-- bullet). A row is written when a GitHub write call - branch creation
+-- (branchService.js's createBranchFrom) or the Phase 4/5 combined push
+-- (commitService.js's commitAndPushChanges) - comes back HTTP 403. That's
+-- the status GitHub surfaces both for an App-permission scope violation and
+-- for the `dev/**` repository ruleset (see githubAppTokenProvider.js's file
+-- comment) rejecting a ref outside the allowed pattern. A 422/409
+-- non-fast-forward push is a routine, already-handled retry case
+-- (commitService.js) and never reaches this table. Classifying "403 means
+-- allowlist block" is a heuristic, not a GitHub guarantee about *why* the
+-- 403 happened - see docs/human-judgment-reliance.md for why this project
+-- treats that kind of judgment call as something to surface to a human
+-- rather than something to resolve with more code.
+CREATE TABLE IF NOT EXISTS blocked_allowlist_alerts (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  repo_id INT UNSIGNED NOT NULL,
+  co_number VARCHAR(20) NULL,
+  branch_name VARCHAR(255) NOT NULL,
+  session_id INT UNSIGNED NULL,
+  operation VARCHAR(50) NOT NULL,
+  http_status SMALLINT UNSIGNED NOT NULL,
+  response_detail TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (repo_id) REFERENCES repos(id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Phase 7: lock-contention observability, one row per genuine contention
+-- event - a user's acquireLock() call (pipelineLock.js) found the
+-- (repo_id, co_number) lock already held by a DIFFERENT user. Deliberately
+-- excludes the "already mine" case coResolutionService.js already treats as
+-- a non-conflict re-resolve (re-selecting a branch you just created in the
+-- same in-flight run), so this table only ever reflects real contention
+-- between two different users on the same CO, feeding the Phase 7
+-- lock-contention dashboard on (repo, CO).
+CREATE TABLE IF NOT EXISTS lock_contention_events (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  repo_id INT UNSIGNED NOT NULL,
+  co_number VARCHAR(20) NOT NULL,
+  requested_by_user_id INT UNSIGNED NOT NULL,
+  held_by_user_id INT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (repo_id) REFERENCES repos(id),
+  FOREIGN KEY (requested_by_user_id) REFERENCES users(id),
+  FOREIGN KEY (held_by_user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -126,7 +126,16 @@ async function commitAndPushChanges({ owner, repoName, branch, changes, commitMe
     // update - anything else is a real failure, not a race to retry through.
     const isNonFastForward = refResponse.status === 422 || refResponse.status === 409;
     if (!isNonFastForward || attempt === MAX_PUSH_RETRIES) {
-      throw new Error(`Failed to update ref "${branch}" after ${attempt} attempt(s) (${refResponse.status}): ${detail}`);
+      // status/responseDetail attached for the same reason as
+      // branchService.js's createBranchFrom above - lets
+      // pipelineService.js tell a Phase 7 blocked-allowlist candidate (403)
+      // apart from any other push failure without re-parsing this error's
+      // text. This module stays GitHub-API-only; it never records the
+      // alert itself.
+      const error = new Error(`Failed to update ref "${branch}" after ${attempt} attempt(s) (${refResponse.status}): ${detail}`);
+      error.status = refResponse.status;
+      error.responseDetail = detail;
+      throw error;
     }
     logger.warn('non-fast-forward push, re-fetching head and retrying', { owner, repoName, branch, attempt, detail });
   }

@@ -66,6 +66,63 @@
         <tr><td colspan="5" class="text-muted">Loading&hellip;</td></tr>
       </tbody>
     </table>
+
+    <h2 class="h4 mt-5">Blocked-allowlist alerts</h2>
+    <p class="text-muted">GitHub write calls (branch creation or a pipeline
+      push) that came back HTTP 403 - the status GitHub surfaces both for an
+      App-permission scope violation and for the <code>dev/**</code>
+      ruleset rejecting a ref outside the allowed pattern. See
+      <code>docs/human-judgment-reliance.md</code> for why this is
+      classified and surfaced rather than auto-resolved.</p>
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr>
+          <th>Repo</th>
+          <th>CO</th>
+          <th>Branch</th>
+          <th>Operation</th>
+          <th>HTTP status</th>
+          <th>When</th>
+        </tr>
+      </thead>
+      <tbody id="alert-rows">
+        <tr><td colspan="6" class="text-muted">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+
+    <h2 class="h4 mt-5">Lock contention dashboard</h2>
+    <p class="text-muted">Currently-held pipeline locks, and historical
+      contention - one user's session finding a <code>(repo, CO)</code>
+      lock already held by a different user (see
+      <code>app/lib/locks/pipelineLock.js</code>).</p>
+    <h3 class="h6 mt-3">Currently held</h3>
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr>
+          <th>Repo</th>
+          <th>CO</th>
+          <th>Held by</th>
+          <th>Locked at</th>
+        </tr>
+      </thead>
+      <tbody id="active-lock-rows">
+        <tr><td colspan="4" class="text-muted">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+    <h3 class="h6 mt-3">Most-contended COs</h3>
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr>
+          <th>Repo</th>
+          <th>CO</th>
+          <th>Contention count</th>
+          <th>Last contended</th>
+        </tr>
+      </thead>
+      <tbody id="lock-contention-rows">
+        <tr><td colspan="4" class="text-muted">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
   </div>
   <script src="/js/api-client.js"></script>
   <script src="/js/dom-utils.js"></script>

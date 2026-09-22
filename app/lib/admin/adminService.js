@@ -5,8 +5,15 @@
 // recordAdminAction below), per roadmap.md's "itself audit-logged"
 // requirement for the Phase 6 admin UI - append-only, same discipline
 // audit_log already follows.
+//
+// Phase 7 additions below (listBlockedAllowlistAlerts, listLockContention,
+// listActiveLocks) are read-only observability queries, not admin
+// mutations - they intentionally don't write to admin_audit_log, since
+// viewing a dashboard isn't an action taken against another user or
+// permission the way everything else in this file is.
 
 const db = require('../db');
+const { listBlockedAllowlistAttempts } = require('../alerts/alertService');
 
 async function recordAdminAction({ adminUserId, action, targetUserId, repoGroupId, detail }) {
   await db.query(
@@ -107,6 +114,43 @@ async function revokePermission({ adminUserId, permissionId }) {
   await recordAdminAction({ adminUserId, action: 'revoke_permission', targetUserId, repoGroupId });
 }
 
+// Phase 7: surfaces blocked_allowlist_alerts rows (see
+// app/lib/alerts/alertService.js and db/schema.sql) in the admin UI.
+async function listBlockedAllowlistAlerts() {
+  return listBlockedAllowlistAttempts();
+}
+
+// Phase 7: aggregated contention counts per (repo, CO) - the "lock
+// contention dashboard" roadmap.md's Phase 7 bullet calls for - ordered so
+// the most-contended COs surface first.
+async function listLockContention() {
+  return db.query(
+    `SELECT e.repo_id AS repoId, r.name AS repoName, e.co_number AS coNumber,
+            COUNT(*) AS contentionCount, MAX(e.created_at) AS lastContentionAt
+     FROM lock_contention_events e
+     JOIN repos r ON r.id = e.repo_id
+     GROUP BY e.repo_id, e.co_number, r.name
+     ORDER BY contentionCount DESC, lastContentionAt DESC`
+  );
+}
+
+// Phase 7: currently-held pipeline locks - the dashboard's other half,
+// showing what's actually serializing right now (not just historical
+// contention). A row's mere existence in pipeline_locks IS the lock (see
+// pipelineLock.js), so this is a plain join, no separate "is it stale"
+// check - the same on-demand-only philosophy this project already applies
+// to branch-deletion detection.
+async function listActiveLocks() {
+  return db.query(
+    `SELECT l.id, l.repo_id AS repoId, r.name AS repoName, l.co_number AS coNumber,
+            l.locked_by_user_id AS lockedByUserId, u.username AS lockedByUsername, l.locked_at AS lockedAt
+     FROM pipeline_locks l
+     JOIN repos r ON r.id = l.repo_id
+     JOIN users u ON u.id = l.locked_by_user_id
+     ORDER BY l.locked_at ASC`
+  );
+}
+
 module.exports = {
   listUsers,
   updateUserInitials,
@@ -114,4 +158,7 @@ module.exports = {
   listPermissions,
   grantPermission,
   revokePermission,
+  listBlockedAllowlistAlerts,
+  listLockContention,
+  listActiveLocks,
 };

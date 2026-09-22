@@ -103,7 +103,18 @@ async function createBranchFrom({ owner, repoName, newBranch, fromBranch, token 
   });
   if (!createResponse.ok) {
     const detail = await createResponse.text();
-    throw new Error(`Failed to create branch "${newBranch}" (${createResponse.status}): ${detail}`);
+    // status/responseDetail are attached (not just baked into the message
+    // string) so a caller can programmatically tell a Phase 7
+    // blocked-allowlist candidate (403) apart from any other failure
+    // without re-parsing this error's text - see
+    // app/lib/branches/coResolutionService.js's createNextBranch, the only
+    // caller that inspects these. This module stays GitHub-API-only per its
+    // file comment above; it never itself decides an alert is worth
+    // recording.
+    const error = new Error(`Failed to create branch "${newBranch}" (${createResponse.status}): ${detail}`);
+    error.status = createResponse.status;
+    error.responseDetail = detail;
+    throw error;
   }
 
   logger.info('created GitHub branch', { owner, repoName, newBranch, fromBranch });

@@ -14,6 +14,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const grantUserSelect = document.getElementById('grant-user-select');
   const grantRepoGroupSelect = document.getElementById('grant-repo-group-select');
   const grantBtn = document.getElementById('grant-btn');
+  const alertRowsEl = document.getElementById('alert-rows');
+  const activeLockRowsEl = document.getElementById('active-lock-rows');
+  const lockContentionRowsEl = document.getElementById('lock-contention-rows');
 
   let currentUsers = [];
 
@@ -109,9 +112,95 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPermissionRows(permissions);
   }
 
+  // Phase 7 - blocked-allowlist alerts + lock-contention dashboard. Same
+  // "reload the source of truth" convention as the rest of this file; these
+  // are read-only, so there's no mutation to trigger a reload from - they
+  // just load once with everything else.
+
+  function renderAlertRows(alerts) {
+    if (alerts.length === 0) {
+      alertRowsEl.innerHTML = '<tr><td colspan="6" class="text-muted">No blocked-allowlist attempts recorded.</td></tr>';
+      return;
+    }
+
+    alertRowsEl.innerHTML = alerts
+      .map((a) => {
+        const when = new Date(a.createdAt).toLocaleString();
+        return `<tr>
+          <td>${escapeHtml(a.repoName)}</td>
+          <td>${escapeHtml(a.coNumber || '—')}</td>
+          <td>${escapeHtml(a.branchName)}</td>
+          <td>${escapeHtml(a.operation)}</td>
+          <td>${a.httpStatus}</td>
+          <td>${escapeHtml(when)}</td>
+        </tr>`;
+      })
+      .join('');
+  }
+
+  function renderActiveLockRows(locks) {
+    if (locks.length === 0) {
+      activeLockRowsEl.innerHTML = '<tr><td colspan="4" class="text-muted">No locks currently held.</td></tr>';
+      return;
+    }
+
+    activeLockRowsEl.innerHTML = locks
+      .map((l) => {
+        const lockedAt = new Date(l.lockedAt).toLocaleString();
+        return `<tr>
+          <td>${escapeHtml(l.repoName)}</td>
+          <td>${escapeHtml(l.coNumber)}</td>
+          <td>${escapeHtml(l.lockedByUsername)}</td>
+          <td>${escapeHtml(lockedAt)}</td>
+        </tr>`;
+      })
+      .join('');
+  }
+
+  function renderLockContentionRows(contention) {
+    if (contention.length === 0) {
+      lockContentionRowsEl.innerHTML = '<tr><td colspan="4" class="text-muted">No lock contention recorded.</td></tr>';
+      return;
+    }
+
+    lockContentionRowsEl.innerHTML = contention
+      .map((c) => {
+        const lastContendedAt = new Date(c.lastContentionAt).toLocaleString();
+        return `<tr>
+          <td>${escapeHtml(c.repoName)}</td>
+          <td>${escapeHtml(c.coNumber)}</td>
+          <td>${c.contentionCount}</td>
+          <td>${escapeHtml(lastContendedAt)}</td>
+        </tr>`;
+      })
+      .join('');
+  }
+
+  async function loadAlerts() {
+    const { alerts } = await window.ApexApi.get('/api/admin/alerts');
+    renderAlertRows(alerts);
+  }
+
+  async function loadActiveLocks() {
+    const { locks } = await window.ApexApi.get('/api/admin/locks');
+    renderActiveLockRows(locks);
+  }
+
+  async function loadLockContention() {
+    const { contention } = await window.ApexApi.get('/api/admin/lock-contention');
+    renderLockContentionRows(contention);
+  }
+
   async function loadAll() {
     try {
-      await Promise.all([loadUsers(), loadRepoGroups(), loadPermissions()]);
+      await Promise.all([
+        loadUsers(),
+        loadRepoGroups(),
+        loadPermissions(),
+        loadAlerts(),
+        loadActiveLocks(),
+        loadLockContention(),
+      ]);
     } catch (err) {
       showError(err.message || 'Failed to load admin data');
     }

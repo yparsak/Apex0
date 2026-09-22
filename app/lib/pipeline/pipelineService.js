@@ -34,6 +34,7 @@ const { runSandbox } = require('./sandboxRunner');
 const { buildRequirementsLogChange } = require('./requirementsLogService');
 const { maybeBuildSpecDocChange } = require('./specDocService');
 const { REQUIREMENTS_LOG_PATH } = require('./deliveryPaths');
+const { recordBlockedAllowlistAttempt } = require('../alerts/alertService');
 
 function makeCodegenError(message) {
   const err = new Error(message);
@@ -312,13 +313,33 @@ async function runPipelineForSession(sessionId) {
     const allChanges = specDocResult.change ? [...changes, requirementsLogChange, specDocResult.change] : [...changes, requirementsLogChange];
 
     const commitMessage = buildCommitMessage({ coNumber: branch.coNumber, requirements, specDocPath });
-    commitSha = await commitAndPushChanges({
-      owner: repo.githubOwner,
-      repoName: repo.name,
-      branch: branch.branchName,
-      changes: allChanges,
-      commitMessage,
-    });
+    try {
+      commitSha = await commitAndPushChanges({
+        owner: repo.githubOwner,
+        repoName: repo.name,
+        branch: branch.branchName,
+        changes: allChanges,
+        commitMessage,
+      });
+    } catch (err) {
+      // Phase 7: same 403-is-a-blocked-allowlist-candidate classification
+      // as coResolutionService.js's createNextBranch - see
+      // db/schema.sql's blocked_allowlist_alerts comment. Recorded here,
+      // not inside commitService.js, so that module stays GitHub-API-only
+      // (same discipline it already keeps against branchService.js).
+      if (err.status === 403) {
+        await recordBlockedAllowlistAttempt({
+          repoId: repo.id,
+          coNumber: branch.coNumber,
+          branchName: branch.branchName,
+          sessionId: session.id,
+          operation: 'push',
+          httpStatus: err.status,
+          responseDetail: err.responseDetail,
+        }).catch((alertErr) => logger.error('failed to record blocked-allowlist alert', { error: alertErr.message }));
+      }
+      throw err;
+    }
 
     // Only once this single combined commit (code + requirements log +
     // optional spec doc) has actually landed does the pipeline release the

@@ -16,8 +16,17 @@
 // optional spec doc) has actually landed. This is the first call site in the
 // project that calls releaseLock() on a successful outcome - see
 // agent-prompts.md's "Phase 5" section.
+//
+// Phase 7: every genuine contention event - one user's acquireLock() losing
+// to a DIFFERENT user's already-held lock - is recorded to
+// lock_contention_events, feeding the Phase 7 lock-contention dashboard on
+// (repo, CO). "Already mine" (coResolutionService.js re-resolving onto a
+// lock this same user still holds) is deliberately excluded - that path
+// never reaches ER_DUP_ENTRY's catch block with a different holder, so it
+// was never contention to begin with.
 
 const db = require('../db');
+const logger = require('../logger');
 
 class LockHeldError extends Error {
   constructor(repoId, coNumber) {
@@ -25,6 +34,23 @@ class LockHeldError extends Error {
     this.name = 'LockHeldError';
     this.code = 'LOCK_HELD';
   }
+}
+
+async function recordContentionIfDifferentHolder({ repoId, coNumber, requestedByUserId }) {
+  const rows = await db.query(
+    'SELECT locked_by_user_id AS heldByUserId FROM pipeline_locks WHERE repo_id = ? AND co_number = ?',
+    [repoId, coNumber]
+  );
+  const heldByUserId = rows[0]?.heldByUserId;
+  // A missing row means the lock was released between the failed INSERT
+  // and this SELECT (the holder's pipeline just finished) - not contention
+  // worth recording, since there's no one left to have blocked anyone.
+  if (!heldByUserId || heldByUserId === requestedByUserId) return;
+
+  await db.query(
+    'INSERT INTO lock_contention_events (repo_id, co_number, requested_by_user_id, held_by_user_id) VALUES (?, ?, ?, ?)',
+    [repoId, coNumber, requestedByUserId, heldByUserId]
+  );
 }
 
 async function acquireLock({ repoId, coNumber, userId }) {
@@ -36,6 +62,9 @@ async function acquireLock({ repoId, coNumber, userId }) {
     ]);
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
+      await recordContentionIfDifferentHolder({ repoId, coNumber, requestedByUserId: userId }).catch((contentionErr) =>
+        logger.error('failed to record lock contention event', { repoId, coNumber, error: contentionErr.message })
+      );
       throw new LockHeldError(repoId, coNumber);
     }
     throw err;

@@ -131,4 +131,38 @@ router.delete('/permissions/:permissionId', async (req, res) => {
   }
 });
 
+// Phase 7: read-only observability endpoints (alerts, lock contention,
+// active locks) - see app/lib/admin/adminService.js. Gated by the same
+// router-wide requireAuth/requireAdmin as everything else in this file.
+
+router.get('/alerts', async (req, res) => {
+  try {
+    const alerts = await adminService.listBlockedAllowlistAlerts();
+    return sendSuccess(res, { alerts });
+  } catch (err) {
+    logger.error('admin list alerts failed', { error: err.message });
+    return sendFailure(res, 500, 'Failed to list alerts', { code: 'INTERNAL_ERROR' });
+  }
+});
+
+router.get('/lock-contention', async (req, res) => {
+  try {
+    const contention = await adminService.listLockContention();
+    return sendSuccess(res, { contention });
+  } catch (err) {
+    logger.error('admin list lock contention failed', { error: err.message });
+    return sendFailure(res, 500, 'Failed to list lock contention', { code: 'INTERNAL_ERROR' });
+  }
+});
+
+router.get('/locks', async (req, res) => {
+  try {
+    const locks = await adminService.listActiveLocks();
+    return sendSuccess(res, { locks });
+  } catch (err) {
+    logger.error('admin list active locks failed', { error: err.message });
+    return sendFailure(res, 500, 'Failed to list active locks', { code: 'INTERNAL_ERROR' });
+  }
+});
+
 module.exports = router;

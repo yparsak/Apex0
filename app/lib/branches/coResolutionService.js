@@ -11,6 +11,7 @@ const db = require('../db');
 const logger = require('../logger');
 const { acquireLock, releaseLock, isLockHeldByUser, LockHeldError } = require('../locks/pipelineLock');
 const { createBranchFrom, mintRepoToken } = require('../github/branchService');
+const { recordBlockedAllowlistAttempt } = require('../alerts/alertService');
 
 async function ensureChangeOrder({ repoId, coNumber }) {
   await db.query('INSERT IGNORE INTO change_orders (repo_id, co_number) VALUES (?, ?)', [repoId, coNumber]);
@@ -49,13 +50,37 @@ async function createNextBranch({ repo, user, coNumber }) {
   const branchName = `dev/${user.initials}-${coNumber}-${nextIncrement}`;
 
   const token = await mintRepoToken(repo.name);
-  await createBranchFrom({
-    owner: repo.githubOwner,
-    repoName: repo.name,
-    newBranch: branchName,
-    fromBranch: repo.defaultBranchName,
-    token,
-  });
+  try {
+    await createBranchFrom({
+      owner: repo.githubOwner,
+      repoName: repo.name,
+      newBranch: branchName,
+      fromBranch: repo.defaultBranchName,
+      token,
+    });
+  } catch (err) {
+    // Phase 7: a 403 here is the status GitHub surfaces both for an
+    // App-permission scope violation and for the `dev/**` ruleset
+    // rejecting this ref - see db/schema.sql's blocked_allowlist_alerts
+    // comment. branchName is always `dev/{initials}-{CO}-{n}` by
+    // construction (see above), so a real-world 403 here would mean the
+    // ruleset itself is misconfigured, not that this code asked for
+    // something outside the pattern - exactly the kind of thing an admin
+    // needs surfaced, not silently retried. No sessions row exists yet at
+    // branch-creation time, so sessionId is intentionally null.
+    if (err.status === 403) {
+      await recordBlockedAllowlistAttempt({
+        repoId: repo.id,
+        coNumber,
+        branchName,
+        sessionId: null,
+        operation: 'create_branch',
+        httpStatus: err.status,
+        responseDetail: err.responseDetail,
+      }).catch((alertErr) => logger.error('failed to record blocked-allowlist alert', { error: alertErr.message }));
+    }
+    throw err;
+  }
 
   const result = await db.query(
     `INSERT INTO branches (repo_id, created_by_user_id, initials, co_number, increment, branch_name, status, last_checked_at)
