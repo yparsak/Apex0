@@ -40,6 +40,25 @@ class LocalPasswordAuthProvider extends AuthProvider {
 
     return { id: user.id, username: user.username, initials: user.initials, isAdmin: Boolean(user.isAdmin) };
   }
+
+  async changePassword(userId, currentPassword, newPassword) {
+    const rows = await db.query('SELECT password_hash FROM users WHERE id = ?', [userId]);
+    if (rows.length === 0) {
+      const err = new Error('User not found');
+      err.code = 'USER_NOT_FOUND';
+      throw err;
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!isMatch) {
+      const err = new Error('Current password is incorrect');
+      err.code = 'INVALID_CURRENT_PASSWORD';
+      throw err;
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, userId]);
+  }
 }
 
 module.exports = LocalPasswordAuthProvider;

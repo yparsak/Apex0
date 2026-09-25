@@ -4,44 +4,14 @@
 
 const express = require('express');
 const { getAuthProvider } = require('../lib/auth');
+const requireAuth = require('../lib/auth/requireAuth');
 const { isNonEmptyString } = require('../lib/validate');
 const { sendSuccess, sendFailure } = require('../lib/respond');
 const logger = require('../lib/logger');
 
 const router = express.Router();
 
-const USERNAME_MAX_LENGTH = 100;
-const INITIALS_MAX_LENGTH = 10;
 const PASSWORD_MIN_LENGTH = 8;
-
-// All fields required — no admin-provisioning flow exists yet (Phase 6), and
-// `users.initials` is NOT NULL with no default, so registration must collect it.
-router.post('/register', async (req, res) => {
-  const { username, password, initials } = req.body || {};
-
-  if (!isNonEmptyString(username, { maxLength: USERNAME_MAX_LENGTH })) {
-    return sendFailure(res, 400, `username is required (max ${USERNAME_MAX_LENGTH} characters)`);
-  }
-  if (!isNonEmptyString(password) || password.length < PASSWORD_MIN_LENGTH) {
-    return sendFailure(res, 400, `password is required (minimum ${PASSWORD_MIN_LENGTH} characters)`);
-  }
-  if (!isNonEmptyString(initials, { maxLength: INITIALS_MAX_LENGTH })) {
-    return sendFailure(res, 400, `initials is required (max ${INITIALS_MAX_LENGTH} characters)`);
-  }
-
-  try {
-    const authProvider = getAuthProvider();
-    const user = await authProvider.register(username.trim(), password, initials.trim());
-    req.session.user = user;
-    return sendSuccess(res, { user }, 'Registered successfully');
-  } catch (err) {
-    if (err.code === 'USERNAME_TAKEN') {
-      return sendFailure(res, 409, 'Username already exists');
-    }
-    logger.error('register failed', { error: err.message });
-    return sendFailure(res, 500, 'Registration failed', { code: 'INTERNAL_ERROR' });
-  }
-});
 
 router.post('/login', async (req, res) => {
   const { username, password } = req.body || {};
@@ -84,6 +54,29 @@ router.get('/me', (req, res) => {
     return sendFailure(res, 401, 'Not authenticated');
   }
   return sendSuccess(res, { user: req.session.user });
+});
+
+router.post('/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (!isNonEmptyString(currentPassword)) {
+    return sendFailure(res, 400, 'currentPassword is required');
+  }
+  if (!isNonEmptyString(newPassword) || newPassword.length < PASSWORD_MIN_LENGTH) {
+    return sendFailure(res, 400, `newPassword is required (minimum ${PASSWORD_MIN_LENGTH} characters)`);
+  }
+
+  try {
+    const authProvider = getAuthProvider();
+    await authProvider.changePassword(req.session.user.id, currentPassword, newPassword);
+    return sendSuccess(res, {}, 'Password changed successfully');
+  } catch (err) {
+    if (err.code === 'INVALID_CURRENT_PASSWORD') {
+      return sendFailure(res, 401, 'Current password is incorrect');
+    }
+    logger.error('change password failed', { userId: req.session.user.id, error: err.message });
+    return sendFailure(res, 500, 'Failed to change password', { code: 'INTERNAL_ERROR' });
+  }
 });
 
 module.exports = router;

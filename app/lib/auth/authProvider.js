@@ -35,6 +35,21 @@ class AuthProvider {
   async verify(_username, _password) {
     throw new Error('AuthProvider.verify() is not implemented');
   }
+
+  /**
+   * Change an already-authenticated user's own password, given their
+   * current one. A future SSO provider may implement this as a no-op/throw
+   * (SSO credentials are managed by the external identity provider, not
+   * this app) - same contract-stands-either-way reasoning as `register()`.
+   * @param {number} userId
+   * @param {string} currentPassword
+   * @param {string} newPassword
+   * @returns {Promise<void>}
+   * @throws {Error} with `err.code === 'INVALID_CURRENT_PASSWORD'` when currentPassword doesn't match
+   */
+  async changePassword(_userId, _currentPassword, _newPassword) {
+    throw new Error('AuthProvider.changePassword() is not implemented');
+  }
 }
 
 module.exports = AuthProvider;

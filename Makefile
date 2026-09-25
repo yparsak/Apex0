@@ -3,7 +3,7 @@ export
 
 MYSQL := mysql -h $(DB_HOST) -P $(DB_PORT) -u $(DB_USER) $(if $(DB_PASSWORD),-p$(DB_PASSWORD))
 
-.PHONY: help setup db-create db-schema db-drop install dev start worker worker-dev seed-admin test-github-token test-model-adapter
+.PHONY: help setup db-create db-schema db-drop install dev start worker worker-dev seed-admin create-user test-github-token test-model-adapter
 
 help:
 	@echo "Targets:"
@@ -17,6 +17,7 @@ help:
 	@echo "  worker              Run the Phase 4 pipeline worker (polls queued sessions)"
 	@echo "  worker-dev          Run the pipeline worker with auto-restart on file changes"
 	@echo "  seed-admin          Create/promote the SEED_ADMIN_* user to admin (see Phase6_test.md)"
+	@echo "  create-user         Create a local user with default password 'change_me' (USERNAME=... INITIALS=...)"
 	@echo "  test-github-token   Manually verify GitHub App token minting (see Phase1_test.md)"
 	@echo "  test-model-adapter  Manually verify the model adapter (see Phase1_test.md)"
 
@@ -48,6 +49,9 @@ worker-dev:
 
 seed-admin:
 	node scripts/seed-admin.js
+
+create-user:
+	./scripts/create-user.sh "$(USERNAME)" "$(INITIALS)"
 
 test-github-token:
 	node scripts/test-github-token.js

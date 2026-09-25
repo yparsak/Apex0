@@ -63,6 +63,10 @@ router.get('/repos/:repoId/branches/:branchId/session', requirePageAuth, (req, r
   return res.render('session', { user: req.session.user, repoId, branchId });
 });
 
+router.get('/change-password', requirePageAuth, (req, res) => {
+  res.render('change-password', { user: req.session.user });
+});
+
 router.get('/admin', requireAdminPage, (req, res) => {
   res.render('admin', { user: req.session.user });
 });

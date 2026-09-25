@@ -55,16 +55,20 @@ Phase 0: gets a local database and the Node app running from a clean checkout.
 
 ## Trying the auth endpoints
 
+Accounts aren't self-service — create one with `scripts/create-user.sh` (or `make create-user USERNAME=... INITIALS=...`), which only works when `AUTH_PROVIDER=local`:
+
+```
+scripts/create-user.sh jdoe JD
+```
+
+This creates the user with a default password of `change_me`; they should log in and change it via the app's "Change password" page immediately.
+
 With the server running:
 
 ```
-curl -i -c cookies.txt -X POST http://localhost:3000/auth/register \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"jdoe","password":"correct-horse","initials":"JD"}'
-
 curl -i -b cookies.txt -c cookies.txt -X POST http://localhost:3000/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"jdoe","password":"correct-horse"}'
+  -d '{"username":"jdoe","password":"change_me"}'
 
 curl -i -b cookies.txt http://localhost:3000/auth/me
 
