@@ -1,8 +1,8 @@
-// Admin page behavior (Phase 6) - user list with inline initials editing,
-// and repo-group access grant/revoke. All three lists (users, repo groups,
-// permissions) are re-fetched after any mutation, same "reload the source
-// of truth rather than hand-patch client state" convention branches.js's
-// resolveCo() already follows.
+// Admin page behavior: default view is the 10 most-recently-added users;
+// searching (username LIKE, "*" as the wildcard) shows every match instead.
+// Clicking a row navigates to that user's Maintenance page
+// (/admin/users/:id), where access grants and initials are managed - see
+// user-maintenance.js. This page itself no longer mutates anything.
 
 document.addEventListener('DOMContentLoaded', () => {
   const escapeHtml = window.ApexDom.escapeHtml;
@@ -10,15 +10,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const errorBox = document.getElementById('admin-error');
   const successBox = document.getElementById('admin-success');
   const userRowsEl = document.getElementById('user-rows');
-  const permissionRowsEl = document.getElementById('permission-rows');
-  const grantUserSelect = document.getElementById('grant-user-select');
-  const grantRepoGroupSelect = document.getElementById('grant-repo-group-select');
-  const grantBtn = document.getElementById('grant-btn');
+  const userListCaption = document.getElementById('user-list-caption');
+  const searchInput = document.getElementById('user-search-input');
+  const searchBtn = document.getElementById('user-search-btn');
+  const clearBtn = document.getElementById('user-search-clear-btn');
   const alertRowsEl = document.getElementById('alert-rows');
   const activeLockRowsEl = document.getElementById('active-lock-rows');
   const lockContentionRowsEl = document.getElementById('lock-contention-rows');
-
-  let currentUsers = [];
 
   function showError(message) {
     successBox.classList.add('d-none');
@@ -26,96 +24,50 @@ document.addEventListener('DOMContentLoaded', () => {
     errorBox.classList.remove('d-none');
   }
 
-  function showSuccess(message) {
-    errorBox.classList.add('d-none');
-    successBox.textContent = message;
-    successBox.classList.remove('d-none');
-  }
-
   function hideMessages() {
     errorBox.classList.add('d-none');
     successBox.classList.add('d-none');
   }
 
-  function renderUserOptions(select) {
-    select.innerHTML = currentUsers
-      .map((u) => `<option value="${u.id}">${escapeHtml(u.username)} (${escapeHtml(u.initials)})</option>`)
-      .join('');
-  }
-
-  function renderUserRows() {
-    if (currentUsers.length === 0) {
-      userRowsEl.innerHTML = '<tr><td colspan="4" class="text-muted">No users yet.</td></tr>';
+  function renderUserRows(users) {
+    if (users.length === 0) {
+      userRowsEl.innerHTML = '<tr><td colspan="4" class="text-muted">No users found.</td></tr>';
       return;
     }
 
-    userRowsEl.innerHTML = currentUsers
-      .map(
-        (u) => `
-          <tr>
+    userRowsEl.innerHTML = users
+      .map((u) => {
+        const added = new Date(u.createdAt).toLocaleString();
+        return `
+          <tr class="user-row" data-user-id="${u.id}" style="cursor: pointer">
             <td>${escapeHtml(u.username)}</td>
-            <td>
-              <input type="text" class="form-control form-control-sm initials-input" style="max-width: 6rem"
-                     data-user-id="${u.id}" value="${escapeHtml(u.initials)}" maxlength="10">
-            </td>
+            <td>${escapeHtml(u.initials)}</td>
             <td>${u.isAdmin ? '<span class="badge bg-primary">Admin</span>' : '<span class="text-muted">&mdash;</span>'}</td>
-            <td><button type="button" class="btn btn-sm btn-outline-primary save-initials-btn" data-user-id="${u.id}">Save</button></td>
-          </tr>`
-      )
-      .join('');
-
-    userRowsEl.querySelectorAll('.save-initials-btn').forEach((btn) => {
-      btn.addEventListener('click', () => saveInitials(Number(btn.dataset.userId)));
-    });
-  }
-
-  function renderPermissionRows(permissions) {
-    if (permissions.length === 0) {
-      permissionRowsEl.innerHTML = '<tr><td colspan="5" class="text-muted">No access granted yet.</td></tr>';
-      return;
-    }
-
-    permissionRowsEl.innerHTML = permissions
-      .map((p) => {
-        const granted = new Date(p.createdAt).toLocaleString();
-        return `<tr>
-          <td>${escapeHtml(p.username)} (${escapeHtml(p.initials)})</td>
-          <td>${escapeHtml(p.orgName)}</td>
-          <td>${escapeHtml(p.repoGroupName)}</td>
-          <td>${escapeHtml(granted)}</td>
-          <td><button type="button" class="btn btn-sm btn-outline-danger revoke-btn" data-permission-id="${p.id}">Revoke</button></td>
-        </tr>`;
+            <td>${escapeHtml(added)}</td>
+          </tr>`;
       })
       .join('');
 
-    permissionRowsEl.querySelectorAll('.revoke-btn').forEach((btn) => {
-      btn.addEventListener('click', () => revokePermission(Number(btn.dataset.permissionId)));
+    userRowsEl.querySelectorAll('.user-row').forEach((row) => {
+      row.addEventListener('click', () => {
+        window.location.href = `/admin/users/${row.dataset.userId}`;
+      });
     });
   }
 
-  async function loadUsers() {
-    const { users } = await window.ApexApi.get('/api/admin/users');
-    currentUsers = users;
-    renderUserRows();
-    renderUserOptions(grantUserSelect);
+  async function loadUsers(search) {
+    hideMessages();
+    const path = search ? `/api/admin/users?search=${encodeURIComponent(search)}` : '/api/admin/users';
+    const { users } = await window.ApexApi.get(path);
+    userListCaption.textContent = search
+      ? `Showing ${users.length} user${users.length === 1 ? '' : 's'} matching "${search}".`
+      : 'Showing the 10 most recently added users.';
+    renderUserRows(users);
   }
 
-  async function loadRepoGroups() {
-    const { repoGroups } = await window.ApexApi.get('/api/admin/repo-groups');
-    grantRepoGroupSelect.innerHTML = repoGroups
-      .map((rg) => `<option value="${rg.id}">${escapeHtml(rg.orgName)} / ${escapeHtml(rg.name)}</option>`)
-      .join('');
-  }
-
-  async function loadPermissions() {
-    const { permissions } = await window.ApexApi.get('/api/admin/permissions');
-    renderPermissionRows(permissions);
-  }
-
-  // Phase 7 - blocked-allowlist alerts + lock-contention dashboard. Same
-  // "reload the source of truth" convention as the rest of this file; these
-  // are read-only, so there's no mutation to trigger a reload from - they
-  // just load once with everything else.
+  // Phase 7 - blocked-allowlist alerts + lock-contention dashboard. Not
+  // user-specific, so these stay on this page rather than moving to the
+  // per-user Maintenance page.
 
   function renderAlertRows(alerts) {
     if (alerts.length === 0) {
@@ -193,67 +145,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadAll() {
     try {
-      await Promise.all([
-        loadUsers(),
-        loadRepoGroups(),
-        loadPermissions(),
-        loadAlerts(),
-        loadActiveLocks(),
-        loadLockContention(),
-      ]);
+      await Promise.all([loadUsers(), loadAlerts(), loadActiveLocks(), loadLockContention()]);
     } catch (err) {
       showError(err.message || 'Failed to load admin data');
     }
   }
 
-  async function saveInitials(userId) {
-    hideMessages();
-    const input = userRowsEl.querySelector(`.initials-input[data-user-id="${userId}"]`);
-    const initials = input.value.trim();
-    if (!initials) {
-      showError('Initials cannot be empty.');
-      return;
-    }
-
-    try {
-      await window.ApexApi.put(`/api/admin/users/${userId}/initials`, { initials });
-      showSuccess('Initials updated.');
-      await loadUsers();
-    } catch (err) {
-      showError(err.message || 'Failed to update initials');
-    }
+  function runSearch() {
+    const term = searchInput.value.trim();
+    loadUsers(term || undefined).catch((err) => showError(err.message || 'Failed to search users'));
   }
 
-  async function grantAccess() {
-    hideMessages();
-    const userId = Number(grantUserSelect.value);
-    const repoGroupId = Number(grantRepoGroupSelect.value);
-    if (!userId || !repoGroupId) {
-      showError('Select both a user and a repo group.');
-      return;
-    }
-
-    try {
-      await window.ApexApi.post('/api/admin/permissions', { userId, repoGroupId });
-      showSuccess('Access granted.');
-      await loadPermissions();
-    } catch (err) {
-      showError(err.message || 'Failed to grant access');
-    }
-  }
-
-  async function revokePermission(permissionId) {
-    hideMessages();
-    try {
-      await window.ApexApi.delete(`/api/admin/permissions/${permissionId}`);
-      showSuccess('Access revoked.');
-      await loadPermissions();
-    } catch (err) {
-      showError(err.message || 'Failed to revoke access');
-    }
-  }
-
-  grantBtn.addEventListener('click', grantAccess);
+  searchBtn.addEventListener('click', runSearch);
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runSearch();
+  });
+  clearBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    loadUsers().catch((err) => showError(err.message || 'Failed to load users'));
+  });
 
   loadAll();
 });

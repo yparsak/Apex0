@@ -11,59 +11,36 @@
   <%- include('partials/header', { user }) %>
   <div class="container">
     <p><a href="/repos">&larr; Back to repositories</a></p>
-    <h1 class="mb-4">Access administration</h1>
+    <h1 class="mb-4">User administration</h1>
 
     <div id="admin-error" class="alert alert-danger d-none"></div>
     <div id="admin-success" class="alert alert-success d-none"></div>
 
     <h2 class="h4">Users</h2>
-    <p class="text-muted">Edit a user's initials (used to name their branches, e.g. <code>dev/{initials}-{CO}-{n}</code>).</p>
+    <p class="text-muted" id="user-list-caption">Showing the 10 most recently added users.</p>
+    <div class="row g-2 mb-3">
+      <div class="col-md-6">
+        <input type="text" id="user-search-input" class="form-control"
+               placeholder="Search username, e.g. *smith* or jo*n (* is a wildcard)">
+      </div>
+      <div class="col-auto">
+        <button id="user-search-btn" type="button" class="btn btn-primary">Search</button>
+      </div>
+      <div class="col-auto">
+        <button id="user-search-clear-btn" type="button" class="btn btn-outline-secondary">Clear</button>
+      </div>
+    </div>
     <table class="table table-hover align-middle">
       <thead>
         <tr>
           <th>Username</th>
           <th>Initials</th>
           <th>Admin</th>
-          <th></th>
+          <th>Added</th>
         </tr>
       </thead>
       <tbody id="user-rows">
         <tr><td colspan="4" class="text-muted">Loading&hellip;</td></tr>
-      </tbody>
-    </table>
-
-    <h2 class="h4 mt-5">Grant repo-group access</h2>
-    <div class="row g-2 mb-3">
-      <div class="col-md-4">
-        <label for="grant-user-select" class="form-label">User</label>
-        <select id="grant-user-select" class="form-select">
-          <option value="">Loading&hellip;</option>
-        </select>
-      </div>
-      <div class="col-md-4">
-        <label for="grant-repo-group-select" class="form-label">Repo group</label>
-        <select id="grant-repo-group-select" class="form-select">
-          <option value="">Loading&hellip;</option>
-        </select>
-      </div>
-      <div class="col-md-2 align-self-end">
-        <button id="grant-btn" type="button" class="btn btn-primary w-100">Grant</button>
-      </div>
-    </div>
-
-    <h2 class="h4 mt-5">Current access</h2>
-    <table class="table table-hover align-middle">
-      <thead>
-        <tr>
-          <th>User</th>
-          <th>Org</th>
-          <th>Repo group</th>
-          <th>Granted</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="permission-rows">
-        <tr><td colspan="5" class="text-muted">Loading&hellip;</td></tr>
       </tbody>
     </table>
 

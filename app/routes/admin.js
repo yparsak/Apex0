@@ -27,12 +27,31 @@ function parsePositiveInt(value) {
 }
 
 router.get('/users', async (req, res) => {
+  const { search } = req.query || {};
   try {
-    const users = await adminService.listUsers();
+    const users = await adminService.listUsers({ search: search ? String(search).trim() : undefined });
     return sendSuccess(res, { users });
   } catch (err) {
     logger.error('admin list users failed', { error: err.message });
     return sendFailure(res, 500, 'Failed to list users', { code: 'INTERNAL_ERROR' });
+  }
+});
+
+router.get('/users/:userId', async (req, res) => {
+  const targetUserId = parsePositiveInt(req.params.userId);
+  if (targetUserId === null) {
+    return sendFailure(res, 400, 'Invalid user id');
+  }
+
+  try {
+    const targetUser = await adminService.getUserById(targetUserId);
+    if (!targetUser) {
+      return sendFailure(res, 404, 'User not found', { code: 'USER_NOT_FOUND' });
+    }
+    return sendSuccess(res, { user: targetUser });
+  } catch (err) {
+    logger.error('admin get user failed', { targetUserId, error: err.message });
+    return sendFailure(res, 500, 'Failed to load user', { code: 'INTERNAL_ERROR' });
   }
 });
 
@@ -74,8 +93,13 @@ router.get('/repo-groups', async (req, res) => {
 });
 
 router.get('/permissions', async (req, res) => {
+  const userId = req.query.userId !== undefined ? parsePositiveInt(req.query.userId) : null;
+  if (req.query.userId !== undefined && userId === null) {
+    return sendFailure(res, 400, 'Invalid user id');
+  }
+
   try {
-    const permissions = await adminService.listPermissions();
+    const permissions = await adminService.listPermissions({ userId });
     return sendSuccess(res, { permissions });
   } catch (err) {
     logger.error('admin list permissions failed', { error: err.message });

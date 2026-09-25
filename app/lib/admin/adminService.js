@@ -15,6 +15,8 @@
 const db = require('../db');
 const { listBlockedAllowlistAttempts } = require('../alerts/alertService');
 
+const RECENT_USERS_LIMIT = 10;
+
 async function recordAdminAction({ adminUserId, action, targetUserId, repoGroupId, detail }) {
   await db.query(
     `INSERT INTO admin_audit_log (admin_user_id, action, target_user_id, repo_group_id, detail)
@@ -23,11 +25,40 @@ async function recordAdminAction({ adminUserId, action, targetUserId, repoGroupI
   );
 }
 
-async function listUsers() {
+// Converts the admin UI's "*string*" search syntax to a SQL LIKE pattern:
+// '*' is the only wildcard the UI exposes, so existing LIKE metacharacters
+// ('%', '_') in the raw search term must be escaped first (else a literal
+// "%" or "_" typed by an admin would silently act as a wildcard too), then
+// '*' is swapped in for '%'.
+function wildcardToLikePattern(search) {
+  return search.replace(/[%_\\]/g, '\\$&').replace(/\*/g, '%');
+}
+
+// No `search` -> the last RECENT_USERS_LIMIT users added, newest first (the
+// default "too many users to list flatly" view). A `search` term instead
+// returns every matching user, unbounded, ordered by username.
+async function listUsers({ search } = {}) {
+  if (search) {
+    return db.query(
+      `SELECT id, username, initials, is_admin AS isAdmin, created_at AS createdAt
+       FROM users WHERE username LIKE ? ORDER BY username`,
+      [wildcardToLikePattern(search)]
+    );
+  }
+
   return db.query(
     `SELECT id, username, initials, is_admin AS isAdmin, created_at AS createdAt
-     FROM users ORDER BY username`
+     FROM users ORDER BY created_at DESC LIMIT ${RECENT_USERS_LIMIT}`
   );
+}
+
+async function getUserById(userId) {
+  const rows = await db.query(
+    `SELECT id, username, initials, is_admin AS isAdmin, created_at AS createdAt
+     FROM users WHERE id = ?`,
+    [userId]
+  );
+  return rows[0] || null;
 }
 
 async function updateUserInitials({ adminUserId, targetUserId, initials }) {
@@ -55,7 +86,17 @@ async function listRepoGroups() {
   );
 }
 
-async function listPermissions() {
+// Optional userId scopes this to one user's grants - the User Maintenance
+// page's "Current access" table. Without it, every grant for every user
+// (the old flat /admin view) is still available for callers that need it.
+async function listPermissions({ userId } = {}) {
+  const params = [];
+  let userFilter = '';
+  if (userId) {
+    userFilter = ' WHERE p.user_id = ?';
+    params.push(userId);
+  }
+
   return db.query(
     `SELECT p.id, p.user_id AS userId, u.username, u.initials,
             p.repo_group_id AS repoGroupId, rg.name AS repoGroupName, o.name AS orgName,
@@ -63,8 +104,9 @@ async function listPermissions() {
      FROM user_repo_group_permissions p
      JOIN users u ON u.id = p.user_id
      JOIN repo_groups rg ON rg.id = p.repo_group_id
-     JOIN orgs o ON o.id = rg.org_id
-     ORDER BY u.username, o.name, rg.name`
+     JOIN orgs o ON o.id = rg.org_id${userFilter}
+     ORDER BY u.username, o.name, rg.name`,
+    params
   );
 }
 
@@ -153,6 +195,7 @@ async function listActiveLocks() {
 
 module.exports = {
   listUsers,
+  getUserById,
   updateUserInitials,
   listRepoGroups,
   listPermissions,

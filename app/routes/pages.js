@@ -71,4 +71,12 @@ router.get('/admin', requireAdminPage, (req, res) => {
   res.render('admin', { user: req.session.user });
 });
 
+router.get('/admin/users/:userId', requireAdminPage, (req, res) => {
+  const userId = Number(req.params.userId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.redirect('/admin');
+  }
+  return res.render('user-maintenance', { user: req.session.user, userId });
+});
+
 module.exports = router;
