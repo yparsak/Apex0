@@ -23,6 +23,7 @@ GITHUB_APP_INSTALLATION_ID=
 MODEL_PROVIDER=nvidia-nim
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 MODEL=moonshotai/kimi-k3
+MODEL_MAX_TOKENS=
 NVIDIA_API_KEY=
 
 SANDBOX_IMAGE=node:20
