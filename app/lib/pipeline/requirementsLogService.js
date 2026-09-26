@@ -18,10 +18,14 @@
 // because this module is the only writer of this file's structure - it never
 // has to cope with arbitrary heading levels or formatting some other tool
 // produced.
-
-const fs = require('fs/promises');
-const path = require('path');
-const { REQUIREMENTS_LOG_PATH } = require('./deliveryPaths');
+//
+// This module stays a pure text-transform module with zero dependencies -
+// deliberately unaware of the DB (documentsService.js, which stores the
+// result) or the filesystem. pipelineService.js is the one place that wires
+// "read existing content from the DB" and "call these transforms" together;
+// keeping that DB access out of here also avoids a require cycle, since
+// documentsService.js needs extractSectionForCo below for its own
+// cross-repo CO lookup.
 
 const HEADING_PATTERN = /^##\s+(.+)$/;
 
@@ -90,36 +94,24 @@ function formatEntry({ branch, session, submittedBy, requirements }) {
 }
 
 // Pure text transform (exported for testability) - given the log's current
-// content (or null if the file doesn't exist yet) and this session's
-// confirmed requirements, returns the full updated file content.
+// content (or null if the record doesn't exist yet) and this session's
+// confirmed requirements, returns the full updated log content.
 function buildUpdatedRequirementsLog({ existingContent, branch, session, submittedBy, requirements }) {
   const base = existingContent === null ? `${FILE_HEADER}\n` : existingContent;
   const entry = formatEntry({ branch, session, submittedBy, requirements });
   return appendEntryUnderHeading(base, branch.coNumber, entry);
 }
 
-// Reads the log from the working tree (if present), appends this session's
-// confirmed requirements under the current CO's heading, and returns a
-// ready-to-commit change object in the same shape pipelineService.js's other
-// `changes` entries use - so it can be folded straight into the same
-// commitAndPushChanges call as the code changes and the spec doc.
-async function buildRequirementsLogChange({ treeDir, branch, session, submittedBy, requirements }) {
-  const targetPath = path.join(treeDir, REQUIREMENTS_LOG_PATH);
-
-  let existingContent = null;
-  try {
-    existingContent = await fs.readFile(targetPath, 'utf-8');
-  } catch (err) {
-    existingContent = null; // File doesn't exist yet on this branch - create it.
-  }
-
-  const content = buildUpdatedRequirementsLog({ existingContent, branch, session, submittedBy, requirements });
-
-  return {
-    path: REQUIREMENTS_LOG_PATH,
-    action: existingContent === null ? 'create' : 'modify',
-    content,
-  };
+// Read-side counterpart to appendEntryUnderHeading's heading-range logic: returns just
+// one CO's section body (trimmed), or null if this log has no entry for that CO. Used by
+// documentsService.js's cross-repo CO search, which can't show a repo's entire
+// multi-CO log for every CO someone searches for.
+function extractSectionForCo(content, coNumber) {
+  if (!content) return null;
+  const lines = content.split('\n');
+  const range = findSectionBodyRange(lines, coNumber);
+  if (range === null) return null;
+  return lines.slice(range.start, range.end).join('\n').trim();
 }
 
-module.exports = { buildUpdatedRequirementsLog, buildRequirementsLogChange };
+module.exports = { buildUpdatedRequirementsLog, extractSectionForCo };

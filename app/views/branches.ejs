@@ -10,7 +10,11 @@
 <body data-repo-id="<%= repoId %>">
   <%- include('partials/header', { user }) %>
   <div class="container">
-    <p><a href="/repos">&larr; Back to repositories</a></p>
+    <p>
+      <a href="/repos">&larr; Back to repositories</a>
+      &nbsp;&middot;&nbsp;
+      <a href="/repos/<%= repoId %>/documents">Documents</a>
+    </p>
     <h1 class="mb-3">Active branches</h1>
 
     <div class="row g-2 mb-3">

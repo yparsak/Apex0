@@ -10,6 +10,7 @@ const { isValidCoNumber } = require('../lib/validate');
 const repoAccess = require('../lib/repos/repoAccess');
 const { refreshActiveBranches } = require('../lib/branches/branchListService');
 const { resolveChangeOrder } = require('../lib/branches/coResolutionService');
+const documentsService = require('../lib/pipeline/documentsService');
 const sessionsRouter = require('./sessions');
 const logger = require('../lib/logger');
 
@@ -97,6 +98,58 @@ router.post('/:repoId/resolve', async (req, res) => {
     }
     logger.error('resolve CO failed', { repoId, error: err.message });
     return sendFailure(res, 500, 'Failed to resolve change order', { code: 'INTERNAL_ERROR' });
+  }
+});
+
+// Documents (browse/download the delivery docs documentsService.js now stores in Apex's
+// own DB instead of pushing them to the customer's repo - see that module's file
+// comment). Same repoAccess.getRepoForUser permission check as every other route here.
+router.get('/:repoId/documents', async (req, res) => {
+  const repoId = parseRepoId(req, res);
+  if (repoId === null) return undefined;
+
+  try {
+    const repo = await repoAccess.getRepoForUser({ repoId, userId: req.session.user.id });
+    if (!repo) {
+      return sendFailure(res, 404, 'Repo not found or access denied');
+    }
+
+    const documents = await documentsService.listDocumentsForRepo(repoId);
+    return sendSuccess(res, { repo, documents });
+  } catch (err) {
+    logger.error('list documents failed', { repoId, error: err.message });
+    return sendFailure(res, 500, 'Failed to list documents', { code: 'INTERNAL_ERROR' });
+  }
+});
+
+router.get('/:repoId/documents/:docId/download', async (req, res) => {
+  const repoId = parseRepoId(req, res);
+  if (repoId === null) return undefined;
+  const docId = Number(req.params.docId);
+  if (!Number.isInteger(docId) || docId <= 0) {
+    return sendFailure(res, 400, 'Invalid document id');
+  }
+
+  try {
+    const repo = await repoAccess.getRepoForUser({ repoId, userId: req.session.user.id });
+    if (!repo) {
+      return sendFailure(res, 404, 'Repo not found or access denied');
+    }
+
+    // Scoped to repoId, not just docId - a document from a different repo (even one
+    // this same user can see) must 404, not download, per repoAccess's convention.
+    const doc = await documentsService.getDocumentForRepoById({ repoId, docId });
+    if (!doc) {
+      return sendFailure(res, 404, 'Document not found');
+    }
+
+    const filename = documentsService.getDownloadFilename({ docType: doc.docType, coNumber: doc.coNumber });
+    res.set('Content-Disposition', `attachment; filename="${filename}"`);
+    res.type('text/markdown');
+    return res.send(doc.content);
+  } catch (err) {
+    logger.error('download document failed', { repoId, docId, error: err.message });
+    return sendFailure(res, 500, 'Failed to download document', { code: 'INTERNAL_ERROR' });
   }
 });
 

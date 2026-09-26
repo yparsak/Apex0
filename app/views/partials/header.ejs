@@ -5,6 +5,7 @@
       <% if (user.isAdmin) { %>
         <a href="/admin" class="btn btn-outline-light btn-sm me-3">Admin</a>
       <% } %>
+      <a href="/documents" class="btn btn-outline-light btn-sm me-3">Documentation</a>
       <a href="/change-password" class="btn btn-outline-light btn-sm me-3">Change password</a>
       <span class="text-light me-3">Signed in as <%= user.username %> (<%= user.initials %>)</span>
       <button id="logout-btn" type="button" class="btn btn-outline-light btn-sm">Log out</button>

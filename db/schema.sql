@@ -252,3 +252,24 @@ CREATE TABLE IF NOT EXISTS lock_contention_events (
   FOREIGN KEY (requested_by_user_id) REFERENCES users(id),
   FOREIGN KEY (held_by_user_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Delivery docs (requirements log, Spec/Communication Protocol doc) no longer ride
+-- along in the Phase 4/5 combined commit to the customer's repo - see
+-- app/lib/pipeline/documentsService.js. Apex now stores them itself: one row per
+-- (repo, doc_type, co_number), browsable/downloadable from the Documents UI instead of
+-- being pushed to GitHub. `co_number` uses `''` as a sentinel for repo-level docs (the
+-- requirements log, one cumulative record per repo, not per CO) rather than NULL,
+-- because MySQL's UNIQUE index treats every NULL as distinct from every other NULL -
+-- an empty-string sentinel is a real value, so the UNIQUE constraint below actually
+-- dedupes the repo-level case instead of silently allowing duplicate rows.
+CREATE TABLE IF NOT EXISTS repo_documents (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  repo_id INT UNSIGNED NOT NULL,
+  doc_type VARCHAR(50) NOT NULL,
+  co_number VARCHAR(20) NOT NULL DEFAULT '',
+  content LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (repo_id) REFERENCES repos(id),
+  UNIQUE (repo_id, doc_type, co_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

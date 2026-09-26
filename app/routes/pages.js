@@ -54,6 +54,21 @@ router.get('/repos/:repoId/branches', requirePageAuth, (req, res) => {
   return res.render('branches', { user: req.session.user, repoId });
 });
 
+router.get('/repos/:repoId/documents', requirePageAuth, (req, res) => {
+  const repoId = Number(req.params.repoId);
+  if (!Number.isInteger(repoId) || repoId <= 0) {
+    return res.redirect('/repos');
+  }
+  return res.render('documents', { user: req.session.user, repoId });
+});
+
+// Global, repo-agnostic CO-scoped document search - unlike every other page route here,
+// this one takes no repoId, since its whole point is looking across every repo the user
+// can access (see app/routes/documents.js).
+router.get('/documents', requirePageAuth, (req, res) => {
+  res.render('documents-search', { user: req.session.user });
+});
+
 router.get('/repos/:repoId/branches/:branchId/session', requirePageAuth, (req, res) => {
   const repoId = Number(req.params.repoId);
   const branchId = Number(req.params.branchId);

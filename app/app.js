@@ -8,6 +8,7 @@ const session = require('express-session');
 const authRoutes = require('./routes/auth');
 const repoRoutes = require('./routes/repos');
 const adminRoutes = require('./routes/admin');
+const documentsRoutes = require('./routes/documents');
 const pageRoutes = require('./routes/pages');
 const logger = require('./lib/logger');
 
@@ -42,6 +43,7 @@ app.use(
 app.use('/auth', authRoutes);
 app.use('/api/repos', repoRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/documents', documentsRoutes);
 app.use('/', pageRoutes);
 
 app.get('/health', (req, res) => {

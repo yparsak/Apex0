@@ -1,10 +1,13 @@
 // Phase 5: model-judgment-gated Spec/Communication Protocol doc regeneration.
 // See roadmap.md's "Spec / Communication Protocol doc" row and
 // agent-prompts.md's "Phase 5" section for the full contract this
-// implements. Orchestrates up to three model calls against the SAME treeDir
-// pipelineService.js already has on disk (post-code-change, pre-commit) -
-// no extra GitHub call is needed to read an existing doc or list files,
-// since the working tree already has everything:
+// implements. Orchestrates up to three model calls against the working tree
+// pipelineService.js already has on disk (post-code-change, pre-commit) for
+// reading the branch's CODE files - no extra GitHub call needed for those,
+// since the working tree already has everything. The existing doc itself
+// (if any) comes from documentsService.js's DB record, not the working
+// tree - this doc is no longer committed to the customer's repo, so there is
+// nothing to read there:
 //
 //   1. Decision - does this branch's code expose an API surface at all, and
 //      if so, does the existing doc (if any) still reflect it. Only a file
@@ -27,7 +30,7 @@ const path = require('path');
 const logger = require('../logger');
 const { runChatTurn } = require('../branches/sessionService');
 const { listFilePaths } = require('./workingTreeService');
-const { getSpecDocPath } = require('./deliveryPaths');
+const { getDocument, DOC_TYPES } = require('./documentsService');
 const {
   buildSpecDecisionMessages,
   buildSpecFileSelectionMessages,
@@ -43,14 +46,6 @@ function makeSpecDocError(message, code) {
   const err = new Error(message);
   err.code = code;
   return err;
-}
-
-async function readExistingSpecDoc(treeDir, specDocPath) {
-  try {
-    return await fs.readFile(path.join(treeDir, specDocPath), 'utf-8');
-  } catch (err) {
-    return null;
-  }
 }
 
 async function decideSpecDocAction({ session, repo, branch, fileListing, existingDoc, diff }) {
@@ -137,14 +132,16 @@ async function generateSpecDocument({ session, repo, branch, fileListing, fileCo
   return document;
 }
 
-// Returns { path: null, change: null } when no regeneration is needed (the
-// common case - most sessions don't touch the API surface), or
-// { path, change } ready to fold into the same commitAndPushChanges call as
-// the code changes and the requirements-log update, when one is.
+// Returns { docType: null } when no regeneration is needed (the common case - most
+// sessions don't touch the API surface), or { docType, coNumber, content } ready for
+// pipelineService.js to persist via documentsService.upsertDocument, when one is.
 async function maybeBuildSpecDocChange({ session, repo, branch, treeDir, diff }) {
-  const specDocPath = getSpecDocPath(branch.coNumber);
   const fileListing = await listFilePaths(treeDir);
-  const existingDoc = await readExistingSpecDoc(treeDir, specDocPath);
+  const existingDoc = await getDocument({
+    repoId: repo.id,
+    docType: DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL,
+    coNumber: branch.coNumber,
+  });
 
   const decision = await decideSpecDocAction({ session, repo, branch, fileListing, existingDoc, diff });
   if (!decision.hasApiSurface || decision.docIsCurrent) {
@@ -154,7 +151,7 @@ async function maybeBuildSpecDocChange({ session, repo, branch, treeDir, diff })
       hasApiSurface: decision.hasApiSurface,
       docIsCurrent: decision.docIsCurrent,
     });
-    return { path: null, change: null };
+    return { docType: null };
   }
 
   const selectedFiles = await selectFilesForSpecDoc({ session, repo, branch, treeDir, fileListing, diff });
@@ -165,12 +162,9 @@ async function maybeBuildSpecDocChange({ session, repo, branch, treeDir, diff })
 
   const content = await generateSpecDocument({ session, repo, branch, fileListing, fileContents, diff });
 
-  logger.info('spec doc regenerated', { sessionId: session.id, branchId: branch.id, specDocPath });
+  logger.info('spec doc regenerated', { sessionId: session.id, branchId: branch.id, coNumber: branch.coNumber });
 
-  return {
-    path: specDocPath,
-    change: { path: specDocPath, action: existingDoc === null ? 'create' : 'modify', content },
-  };
+  return { docType: DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL, coNumber: branch.coNumber, content };
 }
 
 module.exports = { maybeBuildSpecDocChange };

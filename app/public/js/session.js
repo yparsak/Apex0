@@ -187,7 +187,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Both are just links to files on the DEV branch at a known commit, so no
   // new API endpoint was needed - repo/branch/commitSha/specDocPath are all
   // already present in this same GET .../sessions/:id response.
-  function renderPipeline(pipelineRun, repo, branch, requirementsLogPath) {
+  function renderPipeline(pipelineRun, repo, branch) {
     if (!pipelineRun) {
       pipelinePanel.classList.add('d-none');
       return;
@@ -216,10 +216,14 @@ document.addEventListener('DOMContentLoaded', () => {
       pipelineCommitLink.classList.add('d-none');
     }
 
-    // Requirements log: always present once a run has completed, since
-    // every successful run appends to it (creating the file the first time).
-    if (pipelineRun.status === 'completed' && requirementsLogPath) {
-      pipelineRequirementsLogLink.href = `https://github.com/${repo.githubOwner}/${repo.name}/blob/${branch.branchName}/${requirementsLogPath}`;
+    // Requirements log and spec doc no longer get pushed to the customer's repo (see
+    // documentsService.js) - both now point at Apex's own Documents page instead of a
+    // GitHub blob URL.
+
+    // Requirements log: always present once a run has completed, since every successful
+    // run appends to it (creating the record the first time).
+    if (pipelineRun.status === 'completed') {
+      pipelineRequirementsLogLink.href = `/repos/${repoId}/documents`;
       pipelineRequirementsLogLink.textContent = 'View requirements log →';
       pipelineRequirementsLogLink.classList.remove('d-none');
     } else {
@@ -230,7 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // pipelineRun.specDocPath is null on the (common) runs where the model
     // judged no regeneration was needed.
     if (pipelineRun.status === 'completed' && pipelineRun.specDocPath) {
-      pipelineSpecDocLink.href = `https://github.com/${repo.githubOwner}/${repo.name}/blob/${branch.branchName}/${pipelineRun.specDocPath}`;
+      pipelineSpecDocLink.href = `/repos/${repoId}/documents`;
       pipelineSpecDocLink.textContent = 'View Spec/Communication Protocol doc →';
       pipelineSpecDocLink.classList.remove('d-none');
     } else {
@@ -256,7 +260,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderApprovePanel(detail.session.status);
     renderChatAvailability(detail.session.status, detail.pipelineRun);
     renderOtherSessions(detail.otherSessions);
-    renderPipeline(detail.pipelineRun, detail.repo, detail.branch, detail.requirementsLogPath);
+    renderPipeline(detail.pipelineRun, detail.repo, detail.branch);
     schedulePolling(detail.session.status);
   }
 

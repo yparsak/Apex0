@@ -3,19 +3,18 @@
 // branch-existence re-check, host-side "clone" (tarball download),
 // declarative build/test config, two-step non-tool-calling code generation
 // against the model adapter, applying those changes to the working tree, a
-// sandboxed build/test run, and - only on success - the Phase 5 delivery
-// steps (requirements-log append, conditional Spec/Communication Protocol
-// doc regeneration) folded into ONE combined push via GitHub's Git Data API,
-// followed by releasing the CO's pipeline lock. Ends with the session marked
-// `completed`/`failed`.
+// sandboxed build/test run, and - only on success - pushing the code via
+// GitHub's Git Data API and then the Phase 5 delivery steps (requirements-log
+// append, conditional Spec/Communication Protocol doc regeneration),
+// persisted to Apex's own DB (documentsService.js) rather than committed to
+// the customer's repo, followed by releasing the CO's pipeline lock. Ends
+// with the session marked `completed`/`failed`.
 //
 // See roadmap.md's "Phase 4 - Sandboxed execution" and "Phase 5 - DEV branch
 // delivery" bullets for the scope this implements, and agent-prompts.md's
 // "Phase 4" and "Phase 5" sections for the full design rationale (why no
 // tool-calling, why no git binary, why the container is scoped the way it
-// is, the fenced-block tags each phase introduces, and why Phase 5's new
-// steps land in the same commit as Phase 4's code changes rather than a
-// second, separate push).
+// is, the fenced-block tags each phase introduces).
 
 const fs = require('fs/promises');
 const path = require('path');
@@ -31,9 +30,9 @@ const { downloadAndExtractTree, listFilePaths, cleanupWorkingTree } = require('.
 const { buildFileSelectionMessages, buildCodeChangesMessages, FILES_NEEDED_TAG, FILE_CHANGES_TAG } = require('./pipelinePrompts');
 const { parseFilesNeeded, parseFileChanges } = require('./pipelineResponseParsing');
 const { runSandbox } = require('./sandboxRunner');
-const { buildRequirementsLogChange } = require('./requirementsLogService');
+const { buildUpdatedRequirementsLog } = require('./requirementsLogService');
 const { maybeBuildSpecDocChange } = require('./specDocService');
-const { REQUIREMENTS_LOG_PATH } = require('./deliveryPaths');
+const { getDocument, upsertDocument, DOC_TYPES } = require('./documentsService');
 const { recordBlockedAllowlistAttempt } = require('../alerts/alertService');
 
 function makeCodegenError(message) {
@@ -180,15 +179,12 @@ async function applyChangesToWorkingTree(treeDir, changes) {
   }
 }
 
-// Phase 5: the commit message now also records which delivery artifacts
-// (beyond the code itself) rode along in this same combined commit - see
-// the "combined-single-commit design" note in agent-prompts.md's Phase 5
-// section for why these are never a separate, later push.
-function buildCommitMessage({ coNumber, requirements, specDocPath }) {
+// The requirements log and spec doc no longer ride along in this commit - they're
+// persisted to Apex's own DB via documentsService.js instead (see runPipelineForSession
+// below), so this commit message only describes the code itself.
+function buildCommitMessage({ coNumber, requirements }) {
   const bullets = requirements.map((r) => `- ${r}`).join('\n');
-  const delivery = [`- ${REQUIREMENTS_LOG_PATH} updated`];
-  if (specDocPath) delivery.push(`- ${specDocPath} regenerated`);
-  return `Apex: implement requirements for ${coNumber}\n\n${bullets}\n\nDelivery:\n${delivery.join('\n')}`;
+  return `Apex: implement requirements for ${coNumber}\n\n${bullets}`;
 }
 
 // --- orchestration -------------------------------------------------------------
@@ -283,15 +279,18 @@ async function runPipelineForSession(sessionId) {
     // --- Phase 5: DEV branch delivery -------------------------------------
     // Only reached once the sandboxed build/test has actually passed - never
     // worth generating delivery docs for code that doesn't pass its own
-    // tests (see agent-prompts.md's "Phase 5" section). Both steps read/write
-    // the SAME treeDir the code changes were just applied to and validated
-    // in, and their outputs are folded into ONE combined `changes` array
-    // pushed as a single atomic commit below - never a second, later push -
-    // so there is no window where code lands without the requirements log
-    // (and, when applicable, the spec doc), or vice versa.
+    // tests (see agent-prompts.md's "Phase 5" section). Both steps read the
+    // SAME treeDir the code changes were just applied to and validated in,
+    // but their outputs no longer ride along in the code's commit - they're
+    // persisted to Apex's own DB via documentsService.js below, once the
+    // code push has actually landed, so there is still no window where code
+    // lands without the requirements log (and, when applicable, the spec
+    // doc) being recorded, or vice versa - it just isn't a single git commit
+    // doing the guaranteeing anymore.
 
-    const requirementsLogChange = await buildRequirementsLogChange({
-      treeDir,
+    const existingLog = await getDocument({ repoId: repo.id, docType: DOC_TYPES.REQUIREMENTS_LOG });
+    const requirementsLogContent = buildUpdatedRequirementsLog({
+      existingContent: existingLog,
       branch,
       session,
       submittedBy: { username: session.username, initials: session.initials },
@@ -308,17 +307,15 @@ async function runPipelineForSession(sessionId) {
     // a bug: this project never silently skips a delivery artifact just
     // because generating it was hard.
     const specDocResult = await maybeBuildSpecDocChange({ session, repo, branch, treeDir, diff });
-    specDocPath = specDocResult.path;
+    specDocPath = specDocResult.docType;
 
-    const allChanges = specDocResult.change ? [...changes, requirementsLogChange, specDocResult.change] : [...changes, requirementsLogChange];
-
-    const commitMessage = buildCommitMessage({ coNumber: branch.coNumber, requirements, specDocPath });
+    const commitMessage = buildCommitMessage({ coNumber: branch.coNumber, requirements });
     try {
       commitSha = await commitAndPushChanges({
         owner: repo.githubOwner,
         repoName: repo.name,
         branch: branch.branchName,
-        changes: allChanges,
+        changes,
         commitMessage,
       });
     } catch (err) {
@@ -341,8 +338,20 @@ async function runPipelineForSession(sessionId) {
       throw err;
     }
 
-    // Only once this single combined commit (code + requirements log +
-    // optional spec doc) has actually landed does the pipeline release the
+    // Only once the code push has actually landed do the delivery docs get persisted -
+    // a failed push above throws before reaching here, so a run that didn't ship code
+    // never records a requirements-log entry or spec-doc update either.
+    await upsertDocument({ repoId: repo.id, docType: DOC_TYPES.REQUIREMENTS_LOG, content: requirementsLogContent });
+    if (specDocResult.docType) {
+      await upsertDocument({
+        repoId: repo.id,
+        docType: specDocResult.docType,
+        coNumber: specDocResult.coNumber,
+        content: specDocResult.content,
+      });
+    }
+
+    // Only once delivery is fully recorded does the pipeline release the
     // CO's pipeline lock - the first code in this whole project to call
     // releaseLock. See app/lib/locks/pipelineLock.js's and
     // app/lib/branches/coResolutionService.js's file comments, both of which
