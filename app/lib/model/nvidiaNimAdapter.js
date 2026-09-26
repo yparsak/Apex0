@@ -6,18 +6,31 @@
 const ModelAdapter = require('./modelAdapter');
 const logger = require('../logger');
 
-// moonshotai/kimi-k3 has a known, intermittent reasoning-parser bug (see
-// https://github.com/MoonshotAI/Kimi-K3/issues/45 and the NIM-side vLLM fix
-// at https://github.com/vllm-project/vllm/pull/57098): it can return a 200
-// with finish_reason 'stop' where message.content is empty because its
-// answer was mis-routed into message.reasoning_content instead, or - more
-// rarely - dropped entirely. It's server-side and sporadic, not something a
-// request parameter fixes, so this is worked around here with a
-// reasoning_content fallback plus a couple of retries rather than upstream.
+// moonshotai/kimi-k3 has known, intermittent server-side degeneration bugs on
+// NIM's current serving backend - actively reported on NVIDIA's own forums
+// (e.g. https://forums.developer.nvidia.com/t/kimi-k3-outputs-only/384298,
+// "5 to 6 '!' and nothing else... happens in 7/10 requests"; worse on longer
+// prompts per Moonshot's own https://github.com/sgl-project/sglang/issues/40751)
+// on top of the reasoning-parser bug where the answer lands in
+// reasoning_content instead of content, or is dropped entirely
+// (https://github.com/MoonshotAI/Kimi-K3/issues/45,
+// https://github.com/vllm-project/vllm/pull/57098). All of this is
+// server-side and sporadic, not something a request parameter fixes, so
+// it's worked around here with a reasoning_content fallback, a degenerate-
+// output check, and a couple of retries rather than upstream.
 const EMPTY_CONTENT_RETRIES = 2;
 
 function isBlank(text) {
   return typeof text !== 'string' || text.trim().length === 0;
+}
+
+// Catches the repetition-collapse failure mode above: a reply that's almost
+// entirely one repeated character (e.g. "!!!!!!!!!!!!") or, for longer
+// collapses, one repeated short phrase - either way, far too few distinct
+// characters for its length to be a real fenced-block/JSON/prose reply.
+function looksDegenerate(text) {
+  const distinctChars = new Set(text.trim()).size;
+  return distinctChars <= 3 || (text.length > 200 && distinctChars / text.length < 0.01);
 }
 
 class NvidiaNimAdapter extends ModelAdapter {
@@ -56,17 +69,22 @@ class NvidiaNimAdapter extends ModelAdapter {
         content = choice.message.reasoning_content;
       }
 
-      if (!isBlank(content)) {
+      if (!isBlank(content) && !looksDegenerate(content)) {
         return { content };
       }
 
-      logger.warn('NVIDIA NIM returned empty content, retrying', { attempt, finishReason: lastFinishReason });
+      logger.warn('NVIDIA NIM returned empty or degenerate content, retrying', {
+        attempt,
+        finishReason: lastFinishReason,
+        contentPreview: isBlank(content) ? '' : content.slice(0, 80),
+      });
     }
 
-    // Fail loudly rather than letting a null through to sessionService's
-    // recordConversation, which would otherwise surface as an opaque
-    // "Column 'content' cannot be null" DB error instead of this.
-    throw new Error(`NVIDIA NIM chat response had no content after retries (finish_reason: ${lastFinishReason})`);
+    // Fail loudly rather than letting a null/garbage reply through to
+    // sessionService's recordConversation (null hits the DB's NOT NULL
+    // constraint) or the pipeline's fenced-block parser (garbage fails an
+    // opaque "could not be parsed" error) instead of this.
+    throw new Error(`NVIDIA NIM chat response had no usable content after retries (finish_reason: ${lastFinishReason})`);
   }
 }
 
