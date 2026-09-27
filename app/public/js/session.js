@@ -228,7 +228,16 @@ document.addEventListener('DOMContentLoaded', () => {
     pipelineLog.textContent = pipelineRun.log || '(no log yet)';
 
     if (pipelineRun.errorMessage) {
-      pipelineError.textContent = pipelineRun.errorMessage;
+      pipelineError.innerHTML = '';
+      pipelineError.appendChild(document.createTextNode(pipelineRun.errorMessage));
+      if (pipelineRun.status === 'failed') {
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'btn btn-sm btn-outline-danger ms-3';
+        retryBtn.textContent = 'Retry';
+        retryBtn.addEventListener('click', () => retryPipeline(retryBtn));
+        pipelineError.appendChild(retryBtn);
+      }
       pipelineError.classList.remove('d-none');
     } else {
       pipelineError.classList.add('d-none');
@@ -335,6 +344,18 @@ document.addEventListener('DOMContentLoaded', () => {
       showError(err.message || 'Failed to regenerate reply', regenerateLastReply);
     } finally {
       sendBtn.disabled = false;
+    }
+  }
+
+  async function retryPipeline(retryBtn) {
+    hideError();
+    retryBtn.disabled = true;
+    try {
+      await window.ApexApi.post(`${basePath}/${sessionId}/pipeline/retry`);
+      await refreshSession();
+    } catch (err) {
+      showError(err.message || 'Failed to retry pipeline', () => retryPipeline(retryBtn));
+      retryBtn.disabled = false;
     }
   }
 

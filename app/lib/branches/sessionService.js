@@ -562,6 +562,34 @@ async function approveSession({ session, actingUserId }) {
   return getSessionById(session.id);
 }
 
+// Escape hatch for a `failed` pipeline run (e.g. CODEGEN_PARSE_FAILED,
+// SPEC_DECISION_PARSE_FAILED, a sandbox build/test failure) - just re-queues
+// the same session so worker.js's next poll picks it up and runs a brand
+// new pipeline_runs row (see pipelineService.js's runPipelineForSession;
+// nothing about the prior failed row is reused or reset). Same
+// conditional-UPDATE race guard as approveSession above.
+async function retryPipelineRun({ session, actingUserId }) {
+  if (actingUserId !== session.userId) {
+    throw makeError('Only the session owner can retry it', 'FORBIDDEN');
+  }
+
+  const current = await getSessionById(session.id);
+  if (!current || current.status !== 'failed') {
+    throw makeError(
+      `Session is not in a failed state (current status: ${current ? current.status : 'not found'})`,
+      'INVALID_STATE'
+    );
+  }
+
+  const result = await db.query(`UPDATE sessions SET status = 'queued' WHERE id = ? AND status = 'failed'`, [session.id]);
+  if (result.affectedRows !== 1) {
+    throw makeError('Session status changed before retry could be applied - refresh and try again', 'INVALID_STATE');
+  }
+
+  logger.info('pipeline run queued for retry', { sessionId: session.id, actingUserId });
+  return getSessionById(session.id);
+}
+
 // --- read views ---------------------------------------------------------------
 
 async function listOtherSessionsForBranch({ branchId, excludingUserId }) {
@@ -641,6 +669,7 @@ module.exports = {
   regenerateLastReply,
   resolveRequirement,
   approveSession,
+  retryPipelineRun,
   getSessionDetail,
   // Reused as-is by Phase 4's app/lib/pipeline/pipelineService.js for its two
   // system-triggered model calls (file-selection, code-changes), so every

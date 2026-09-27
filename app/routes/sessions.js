@@ -218,4 +218,21 @@ router.post('/:sessionId/approve', async (req, res) => {
   }
 });
 
+router.post('/:sessionId/pipeline/retry', async (req, res) => {
+  const ctx = await loadRepoAndBranch(req, res);
+  if (!ctx) return undefined;
+  const session = await loadOwnedSession(req, res, ctx.branch.id);
+  if (!session) return undefined;
+
+  try {
+    const updated = await sessionService.retryPipelineRun({ session, actingUserId: req.session.user.id });
+    return sendSuccess(res, { session: updated }, 'Pipeline run queued for retry');
+  } catch (err) {
+    if (err.code === 'INVALID_STATE') return sendFailure(res, 409, err.message, { code: err.code });
+    if (err.code === 'FORBIDDEN') return sendFailure(res, 403, err.message, { code: err.code });
+    logger.error('retry pipeline run failed', { sessionId: session.id, error: err.message });
+    return sendFailure(res, 500, 'Failed to retry pipeline run', { code: 'INTERNAL_ERROR' });
+  }
+});
+
 module.exports = router;
