@@ -145,6 +145,29 @@ router.post('/:sessionId/messages', async (req, res) => {
   }
 });
 
+router.post('/:sessionId/regenerate', async (req, res) => {
+  const ctx = await loadRepoAndBranch(req, res);
+  if (!ctx) return undefined;
+  const session = await loadOwnedSession(req, res, ctx.branch.id);
+  if (!session) return undefined;
+
+  try {
+    const reply = await sessionService.regenerateLastReply({
+      session,
+      repo: ctx.repo,
+      branch: ctx.branch,
+      actingUserId: req.session.user.id,
+    });
+    return sendSuccess(res, { reply }, 'Reply regenerated');
+  } catch (err) {
+    if (err.code === 'SESSION_TERMINAL') return sendFailure(res, 409, err.message, { code: err.code });
+    if (err.code === 'INVALID_STATE') return sendFailure(res, 409, err.message, { code: err.code });
+    if (err.code === 'FORBIDDEN') return sendFailure(res, 403, err.message, { code: err.code });
+    logger.error('regenerate session reply failed', { sessionId: session.id, error: err.message });
+    return sendFailure(res, 502, 'Failed to regenerate reply', { code: 'MODEL_ERROR' });
+  }
+});
+
 router.post('/:sessionId/requirements/:requirementId/resolve', async (req, res) => {
   const ctx = await loadRepoAndBranch(req, res);
   if (!ctx) return undefined;

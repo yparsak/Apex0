@@ -424,6 +424,82 @@ async function postMessage({ session, repo, branch, actingUserId, message }) {
   return { finalized: true, reply, requirements };
 }
 
+// Manual escape hatch for the NVIDIA NIM degeneration bug documented in
+// nvidiaNimAdapter.js: that adapter already retries and rejects the most
+// blatant garbage (e.g. a reply that's nothing but repeated "!"), but a
+// reply that mixes in enough other characters can still slip through as a
+// perfectly normal-looking 200. Only the session's own most recent visible
+// (user/assistant) turn is regenerable, and only when it's an assistant
+// reply - regenerating an older turn would mean re-deriving everything that
+// happened after it (later requirements, resolutions, etc.), which this
+// deliberately does not attempt.
+async function regenerateLastReply({ session, repo, branch, actingUserId }) {
+  if (actingUserId !== session.userId) {
+    throw makeError('Only the session owner can regenerate a reply', 'FORBIDDEN');
+  }
+  if (session.status === 'completed' || session.status === 'failed') {
+    throw makeError('This session has already finished and cannot be modified', 'SESSION_TERMINAL');
+  }
+  if (session.status === 'running' && (await hasActivePipelineRun(session.id))) {
+    throw makeError('This session is currently being implemented and cannot be modified', 'SESSION_TERMINAL');
+  }
+
+  const visibleRows = await db.query(
+    `SELECT id, role, content, created_at AS createdAt FROM conversations
+     WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY created_at ASC`,
+    [session.id]
+  );
+  const last = visibleRows[visibleRows.length - 1];
+  if (!last || last.role !== 'assistant') {
+    throw makeError('The latest message is not an agent reply that can be regenerated', 'INVALID_STATE');
+  }
+
+  // If this reply already led to real side effects (it got parsed as a
+  // finalized requirements set), silently swapping its content would leave
+  // those session_requirements rows orphaned from what the transcript now
+  // shows - refuse rather than guess at cleanup.
+  const laterRequirements = await db.query(
+    `SELECT 1 FROM session_requirements WHERE session_id = ? AND submitted_at > ? LIMIT 1`,
+    [session.id, last.createdAt]
+  );
+  if (laterRequirements.length > 0) {
+    throw makeError('This reply already produced requirements and cannot be regenerated', 'INVALID_STATE');
+  }
+
+  const priorRows = visibleRows.slice(0, -1);
+  const messages =
+    priorRows.length === 0
+      ? await (async () => {
+          // Nothing before it at all - this was the session's opening
+          // start-summary turn (see generateStartSummary), not a Q&A reply.
+          const diff = await getBranchDiffSummary({
+            owner: repo.githubOwner,
+            repoName: repo.name,
+            base: repo.defaultBranchName,
+            head: branch.branchName,
+          });
+          const history = await getAuditHistory({ repoId: repo.id, coNumber: branch.coNumber });
+          return buildStartSummaryMessages({ repo, branch, diff, history });
+        })()
+      : [
+          { role: 'system', content: buildQaSystemPrompt({ repo, branch }) },
+          ...priorRows.map((r) => ({ role: r.role, content: r.content })),
+        ];
+
+  const { content } = await getModelAdapter().chat({ messages });
+
+  await db.query('UPDATE conversations SET content = ? WHERE id = ?', [content, last.id]);
+  await recordAudit({
+    userId: actingUserId,
+    repoId: repo.id,
+    coNumber: branch.coNumber,
+    rawInstructions: null,
+    qaHistory: content,
+  });
+
+  return content;
+}
+
 // --- resolve / confirm --------------------------------------------------------
 
 async function resolveRequirement({ session, requirementId, resolution, actingUserId }) {
@@ -562,6 +638,7 @@ module.exports = {
   getSessionForBranch,
   startOrResumeSession,
   postMessage,
+  regenerateLastReply,
   resolveRequirement,
   approveSession,
   getSessionDetail,

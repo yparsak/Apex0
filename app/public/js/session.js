@@ -41,8 +41,20 @@ document.addEventListener('DOMContentLoaded', () => {
   let sessionId = null;
   let pollTimer = null;
 
-  function showError(message) {
-    errorBox.textContent = message;
+  // onRetry, when given, is just the same request function - the failed
+  // call's own state (e.g. sendMessage's still-unsent messageInput.value)
+  // is already sitting there, so re-invoking it is a plain resend.
+  function showError(message, onRetry) {
+    errorBox.innerHTML = '';
+    errorBox.appendChild(document.createTextNode(message));
+    if (onRetry) {
+      const retryBtn = document.createElement('button');
+      retryBtn.type = 'button';
+      retryBtn.className = 'btn btn-sm btn-outline-danger ms-3';
+      retryBtn.textContent = 'Retry';
+      retryBtn.addEventListener('click', onRetry);
+      errorBox.appendChild(retryBtn);
+    }
     errorBox.classList.remove('d-none');
   }
 
@@ -76,20 +88,34 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptEl.innerHTML = '<p class="text-muted">No messages yet.</p>';
       return;
     }
+    const lastIndex = conversations.length - 1;
     transcriptEl.innerHTML = conversations
-      .map((c) => {
+      .map((c, i) => {
         const isUser = c.role === 'user';
         const label = isUser ? 'You' : 'Agent';
         const align = isUser ? 'text-end' : 'text-start';
         const bg = isUser ? 'bg-primary text-white' : 'bg-light';
+        // Only the single latest agent reply is regenerable (see
+        // sessionService.regenerateLastReply) - an escape hatch for the
+        // NVIDIA NIM garbage-output bug slipping past the adapter's own
+        // filter as a normal-looking 200.
+        const canRegenerate = !isUser && i === lastIndex;
+        const regenerateBtn = canRegenerate
+          ? `<button type="button" class="btn btn-sm btn-outline-secondary regenerate-btn mt-2 d-block">Regenerate</button>`
+          : '';
         return `<div class="mb-2 ${align}">
           <div class="d-inline-block p-2 rounded ${bg}" style="max-width: 80%; white-space: pre-wrap; text-align: left;">
-            <div class="small fw-bold mb-1">${label}</div>${escapeHtml(c.content)}
+            <div class="small fw-bold mb-1">${label}</div>${escapeHtml(c.content)}${regenerateBtn}
           </div>
         </div>`;
       })
       .join('');
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+    const regenerateBtn = transcriptEl.querySelector('.regenerate-btn');
+    if (regenerateBtn) {
+      regenerateBtn.addEventListener('click', regenerateLastReply);
+    }
   }
 
   function renderRequirements(requirements) {
@@ -270,7 +296,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const detail = await window.ApexApi.post(basePath);
       renderDetail(detail);
     } catch (err) {
-      showError(err.message || 'Failed to start or resume session');
+      showError(err.message || 'Failed to start or resume session', loadOrStartSession);
     }
   }
 
@@ -293,7 +319,20 @@ document.addEventListener('DOMContentLoaded', () => {
       messageInput.value = '';
       await refreshSession();
     } catch (err) {
-      showError(err.message || 'Failed to send message');
+      showError(err.message || 'Failed to send message', sendMessage);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  async function regenerateLastReply() {
+    hideError();
+    sendBtn.disabled = true;
+    try {
+      await window.ApexApi.post(`${basePath}/${sessionId}/regenerate`);
+      await refreshSession();
+    } catch (err) {
+      showError(err.message || 'Failed to regenerate reply', regenerateLastReply);
     } finally {
       sendBtn.disabled = false;
     }
