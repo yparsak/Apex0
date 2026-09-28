@@ -46,14 +46,26 @@ class NvidiaNimAdapter extends ModelAdapter {
     let lastFinishReason = 'unknown';
 
     for (let attempt = 1; attempt <= EMPTY_CONTENT_RETRIES + 1; attempt++) {
-      const response = await fetch(`${process.env.NVIDIA_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
+      let response;
+      try {
+        response = await fetch(`${process.env.NVIDIA_BASE_URL}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        // Node's fetch (undici) collapses every network-level failure - DNS, connection
+        // reset, or its own default ~300s headers/body timeout - into a generic
+        // "fetch failed" TypeError, with the actual reason only on `err.cause`. Without
+        // surfacing that here, every caller's logs (e.g. worker.js's "spec doc job
+        // failed") only ever show "fetch failed", which is nearly useless for telling a
+        // slow/hung model response apart from an actual network outage.
+        const cause = err.cause ? ` (${err.cause.code || err.cause.message || err.cause})` : '';
+        throw new Error(`NVIDIA NIM chat request errored${cause}: ${err.message}`);
+      }
 
       if (!response.ok) {
         const detail = await response.text();
