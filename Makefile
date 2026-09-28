@@ -3,23 +3,25 @@ export
 
 MYSQL := mysql -h $(DB_HOST) -P $(DB_PORT) -u $(DB_USER) $(if $(DB_PASSWORD),-p$(DB_PASSWORD))
 
-.PHONY: help setup db-create db-schema db-drop install dev start worker worker-dev seed-admin create-user test-github-token test-model-adapter
+.PHONY: help setup db-create db-schema db-drop install dev start worker worker-dev seed-admin create-user test-github-token test-model-adapter purge-legacy-spec-docs
 
 help:
 	@echo "Targets:"
-	@echo "  setup               Create the database (if missing) and apply db/schema.sql"
-	@echo "  db-create           Create the database if it doesn't exist"
-	@echo "  db-schema           Apply db/schema.sql to the database"
-	@echo "  db-drop             Drop the database - destructive, local dev only"
-	@echo "  install             npm install app dependencies"
-	@echo "  dev                 Run the app with auto-restart on file changes"
-	@echo "  start               Run the app"
-	@echo "  worker              Run the Phase 4 pipeline worker (polls queued sessions)"
-	@echo "  worker-dev          Run the pipeline worker with auto-restart on file changes"
-	@echo "  seed-admin          Create/promote the SEED_ADMIN_* user to admin (see Phase6_test.md)"
-	@echo "  create-user         Create a local user with default password 'change_me' (USERNAME=... INITIALS=...)"
-	@echo "  test-github-token   Manually verify GitHub App token minting (see Phase1_test.md)"
-	@echo "  test-model-adapter  Manually verify the model adapter (see Phase1_test.md)"
+	@echo "  setup                    Create the database (if missing) and apply db/schema.sql"
+	@echo "  db-create                Create the database if it doesn't exist"
+	@echo "  db-schema                Apply db/schema.sql to the database"
+	@echo "  db-drop                  Drop the database - destructive, local dev only"
+	@echo "  install                  npm install app dependencies"
+	@echo "  dev                      Run the app with auto-restart on file changes"
+	@echo "  start                    Run the app"
+	@echo "  worker                   Run the pipeline worker (polls queued sessions AND the spec-doc job queue,"
+	@echo "                           and periodically scans every repo's trunk for staleness - see worker.js)"
+	@echo "  worker-dev               Run the pipeline worker with auto-restart on file changes"
+	@echo "  seed-admin               Create/promote the SEED_ADMIN_* user to admin (see Phase6_test.md)"
+	@echo "  create-user              Create a local user with default password 'change_me' (USERNAME=... INITIALS=...)"
+	@echo "  purge-legacy-spec-docs   One-time delete of pre-rework, CO-keyed Spec/Communication Protocol rows"
+	@echo "  test-github-token        Manually verify GitHub App token minting (see Phase1_test.md)"
+	@echo "  test-model-adapter       Manually verify the model adapter (see Phase1_test.md)"
 
 setup: db-create db-schema
 
@@ -49,6 +51,9 @@ worker-dev:
 
 seed-admin:
 	node scripts/seed-admin.js
+
+purge-legacy-spec-docs:
+	node scripts/purge-legacy-spec-docs.js
 
 create-user:
 	./scripts/create-user.sh "$(USERNAME)" "$(INITIALS)"

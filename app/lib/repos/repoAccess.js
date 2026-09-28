@@ -16,6 +16,7 @@ const db = require('../db');
 
 const REPO_SELECT = `
   SELECT r.id, r.name, r.default_branch_name AS defaultBranchName,
+         r.spec_doc_synced_commit_sha AS specDocSyncedCommitSha,
          rg.id AS repoGroupId, rg.name AS repoGroupName,
          o.id AS orgId, o.name AS githubOwner
   FROM repos r
@@ -43,4 +44,21 @@ async function getRepoForUser({ repoId, userId }) {
   return rows[0] || null;
 }
 
-module.exports = { listReposForUser, getRepoForUser };
+// Deliberately unscoped by user permission - the Spec/Communication Protocol
+// trunk-staleness scan (app/lib/pipeline/specDocScanService.js) is a system job with no
+// acting user, and by design covers every repo in the system, not one user's accessible
+// subset. Reuses REPO_SELECT so it stays in sync with listReposForUser/getRepoForUser's
+// column set instead of drifting.
+async function listAllRepos() {
+  return db.query(`${REPO_SELECT} ORDER BY r.name`);
+}
+
+// Same unscoped rationale as listAllRepos - worker.js's spec-doc job processing loads a
+// repo by id off a system-enqueued spec_doc_jobs row, with no acting user to scope
+// through.
+async function getRepoById(repoId) {
+  const rows = await db.query(`${REPO_SELECT} WHERE r.id = ?`, [repoId]);
+  return rows[0] || null;
+}
+
+module.exports = { listReposForUser, getRepoForUser, listAllRepos, getRepoById };

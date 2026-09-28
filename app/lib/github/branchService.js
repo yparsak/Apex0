@@ -83,6 +83,25 @@ async function branchExists({ owner, repoName, branch, token }) {
   return true;
 }
 
+// Phase 5 rework: the trunk-staleness scan (app/lib/pipeline/specDocScanService.js)
+// needs only the current HEAD sha of a repo's default branch, not the full commit
+// object - the same ref-resolution endpoint createBranchFrom already uses to find
+// `fromBranch`'s sha, reused here rather than hitting the heavier /commits endpoint for
+// the same fact.
+async function getLatestCommitSha({ owner, repoName, branch, token }) {
+  const accessToken = await resolveToken(repoName, token);
+  const response = await githubRequest(
+    accessToken,
+    `/repos/${owner}/${repoName}/git/ref/heads/${encodeURIComponent(branch)}`
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Failed to resolve "${branch}" sha (${response.status}): ${detail}`);
+  }
+  const data = await response.json();
+  return data.object.sha;
+}
+
 async function createBranchFrom({ owner, repoName, newBranch, fromBranch, token }) {
   const accessToken = await resolveToken(repoName, token);
 
@@ -124,4 +143,12 @@ async function createBranchFrom({ owner, repoName, newBranch, fromBranch, token 
 // app/lib/github/diffService.js, Phase 3) that need the same
 // auth/header-construction wrapper but call a different endpoint - keeps
 // that boilerplate in one place rather than re-implementing it per module.
-module.exports = { branchExists, createBranchFrom, mintRepoToken, mintCloneOnlyToken, mintPushToken, githubRequest };
+module.exports = {
+  branchExists,
+  createBranchFrom,
+  getLatestCommitSha,
+  mintRepoToken,
+  mintCloneOnlyToken,
+  mintPushToken,
+  githubRequest,
+};

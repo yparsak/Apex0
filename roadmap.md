@@ -121,9 +121,9 @@ Because the AI's output stops at a DEV branch, and every regulated-adjacent acti
 
 **Phase 5 — DEV branch delivery**
 - Push/update DEV branch. No PR, no merge.
-- Regenerate and commit the Spec/Communication Protocol doc from full branch state, at a CO-number-keyed path.
 - Append user requirements to the branch's requirements log MD file under a heading for the current CO; create the file if it doesn't exist.
 - Downstream (TEST, PR-to-main) explicitly out of scope for this tool.
+- **Spec/Communication Protocol doc — reworked, no longer part of this per-session flow.** It is not CO-scoped and does not reflect any branch's diff: one doc per repo, describing only the current state of `default_branch_name` (main/master), regenerated whenever trunk moves. `worker.js` runs two loops: a slow periodic scan across every repo in the system comparing trunk's latest commit against the commit the repo's current doc reflects, enqueueing a job (`spec_doc_jobs`) when they differ; and the existing fast session-poll loop, which now also drains that queue. See `app/lib/pipeline/specDocScanService.js`, `specDocJobService.js`, and `specDocService.js`.
 
 **Phase 6 — Access administration**
 - Admin UI for `user_repo_group_permissions`, itself audit-logged.

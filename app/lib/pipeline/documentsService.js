@@ -7,8 +7,10 @@
 // by hand if they want that.
 //
 // `co_number` uses `''` as the sentinel for repo-level docs (the requirements log is one
-// cumulative record per repo, not per CO) rather than NULL - see db/schema.sql's comment
-// on this table for why NULL would break the UNIQUE constraint's dedup.
+// cumulative record per repo, not per CO; the Spec/Communication Protocol doc is now
+// also one record per repo, describing trunk's current state rather than any one
+// branch/CO - see specDocService.js) rather than NULL - see db/schema.sql's comment on
+// this table for why NULL would break the UNIQUE constraint's dedup.
 
 const db = require('../db');
 const { extractSectionForCo } = require('./requirementsLogService');
@@ -56,20 +58,26 @@ async function getDocumentForRepoById({ repoId, docId }) {
 
 // Cross-repo lookup for the global CO-scoped search: every document, in every repo the
 // user has permission to see, that actually concerns this CO. The Spec/Communication
-// Protocol doc matches directly on co_number. The requirements log doesn't - it's one
-// cumulative row per repo covering every CO ever logged on that branch - so each
-// accessible repo's log is run through extractSectionForCo and dropped if that CO never
-// appears in it, rather than returning the whole multi-CO file for every repo.
+// Protocol doc is no longer CO-scoped itself (one row per repo, co_number='' - see
+// specDocService.js) since it now always describes trunk's current state rather than a
+// specific branch/CO's - so "concerns this CO" is resolved via the `change_orders`
+// table (has this repo ever logged this CO at all) instead of matching the doc's own
+// co_number, and what comes back is that repo's one current doc, not a per-CO snapshot
+// of it. The requirements log is handled differently again - it's one cumulative row per
+// repo covering every CO ever logged on that branch - so each accessible repo's log is
+// run through extractSectionForCo and dropped if that CO never appears in it, rather
+// than returning the whole multi-CO file for every repo.
 async function listDocumentsForUserAndCo({ userId, coNumber }) {
   const specRows = await db.query(
     `SELECT rd.id, rd.repo_id AS repoId, r.name AS repoName, rd.doc_type AS docType,
             rd.co_number AS coNumber, rd.content, rd.updated_at AS updatedAt
-     FROM repo_documents rd
-     JOIN repos r ON r.id = rd.repo_id
+     FROM change_orders co
+     JOIN repos r ON r.id = co.repo_id
      JOIN repo_groups rg ON rg.id = r.repo_group_id
      JOIN user_repo_group_permissions p ON p.repo_group_id = rg.id
-     WHERE p.user_id = ? AND rd.doc_type = ? AND rd.co_number = ?`,
-    [userId, DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL, coNumber]
+     JOIN repo_documents rd ON rd.repo_id = r.id AND rd.doc_type = ?
+     WHERE p.user_id = ? AND co.co_number = ?`,
+    [DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL, userId, coNumber]
   );
 
   const logRows = await db.query(
@@ -90,9 +98,10 @@ async function listDocumentsForUserAndCo({ userId, coNumber }) {
   return [...specRows, ...logMatches];
 }
 
-function getDownloadFilename({ docType, coNumber }) {
+function getDownloadFilename({ docType }) {
   if (docType === DOC_TYPES.REQUIREMENTS_LOG) return 'USER_REQ_LOG.md';
-  if (docType === DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL) return `SPEC_COM_PROTOCOL-${coNumber}.md`;
+  // No coNumber suffix - there's only ever one Spec CP doc per repo now (co_number='').
+  if (docType === DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL) return 'SPEC_COM_PROTOCOL.md';
   return 'document.md';
 }
 

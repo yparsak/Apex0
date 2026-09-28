@@ -1,36 +1,24 @@
-// Phase 5: model-judgment-gated Spec/Communication Protocol doc regeneration.
-// See roadmap.md's "Spec / Communication Protocol doc" row and
-// agent-prompts.md's "Phase 5" section for the full contract this
-// implements. Orchestrates up to three model calls against the working tree
-// pipelineService.js already has on disk (post-code-change, pre-commit) for
-// reading the branch's CODE files - no extra GitHub call needed for those,
-// since the working tree already has everything. The existing doc itself
-// (if any) comes from documentsService.js's DB record, not the working
-// tree - this doc is no longer committed to the customer's repo, so there is
-// nothing to read there:
+// Spec/Communication Protocol doc regeneration, rewritten for the trunk-staleness
+// rework - see specDocScanService.js (detects staleness, enqueues a job),
+// specDocJobService.js (the queue), and worker.js (drains it). This is no longer part
+// of the per-session pipeline: it runs against a repo's default (trunk) branch tree
+// directly (app/lib/pipeline/workingTreeService.js's downloadAndExtractTree, same as
+// pipelineService.js uses, just against trunk instead of a dev branch), with no branch,
+// CO number, or diff involved at all - one doc per repo, always describing trunk's
+// current state.
 //
-//   1. Decision - does this branch's code expose an API surface at all, and
-//      if so, does the existing doc (if any) still reflect it. Only a file
-//      listing + the existing doc's content (if any) is given - not full
-//      file contents, which would be wasteful for a call whose only job is
-//      "should we bother."
-//   2. File selection (only if step 1 says a regeneration is needed) - the
-//      same "which existing files do you need to read in full" shape Phase
-//      4's code-gen already uses, reusing its FILES_NEEDED_TAG/
-//      parseFilesNeeded pair directly (see specDocPrompts.js).
-//   3. Document generation (only reached from step 2) - emit the entire
-//      regenerated document as plain Markdown.
-//
-// Every model call goes through the same runChatTurn helper Phase 3/4
-// already established, so this gets the same conversations/audit_log
-// discipline for free - see agent-prompts.md's "Phase 5" section.
+// A repo-scan job has no `session`/`actingUserId` the way a user-driven pipeline run
+// does, so unlike Phase 3/4/5's model calls this does NOT go through
+// app/lib/branches/sessionService.js's runChatTurn (which persists to `conversations`/
+// `audit_log`, both scoped to a user session) - it calls the model adapter directly.
+// Observability is via `logger`, the same as worker.js's own poll/claim/scan logging.
 
 const fs = require('fs/promises');
 const path = require('path');
 const logger = require('../logger');
-const { runChatTurn } = require('../branches/sessionService');
+const { getModelAdapter } = require('../model');
 const { listFilePaths } = require('./workingTreeService');
-const { getDocument, DOC_TYPES } = require('./documentsService');
+const { getDocument, upsertDocument, DOC_TYPES } = require('./documentsService');
 const {
   buildSpecDecisionMessages,
   buildSpecFileSelectionMessages,
@@ -48,25 +36,16 @@ function makeSpecDocError(message, code) {
   return err;
 }
 
-async function decideSpecDocAction({ session, repo, branch, fileListing, existingDoc, diff }) {
-  const messages = buildSpecDecisionMessages({ repo, branch, fileListing, existingDoc, diff });
-  const reply = await runChatTurn({
-    session,
-    repo,
-    coNumber: branch.coNumber,
-    actingUserId: session.userId,
-    messages,
-    persistUserMessage: null,
-    replyRole: 'system',
-  });
+async function chat(messages) {
+  const { content } = await getModelAdapter().chat({ messages });
+  return content;
+}
+
+async function decideSpecDocAction({ repo, fileListing, existingDoc }) {
+  const reply = await chat(buildSpecDecisionMessages({ repo, fileListing, existingDoc }));
 
   const decision = parseSpecDecision(reply);
   if (decision === null) {
-    // Fail closed, not fail-permissive in either direction - see
-    // specDocResponseParsing.js's parseSpecDecision comment and
-    // agent-prompts.md's "Phase 5" section: an ambiguous decision reply must
-    // not silently skip a needed regeneration, and must not silently
-    // regenerate one that wasn't needed either.
     throw makeSpecDocError(
       `Model reply for spec-doc decision (expected a fenced "${SPEC_DECISION_TAG}" block) could not be parsed`,
       'SPEC_DECISION_PARSE_FAILED'
@@ -75,17 +54,8 @@ async function decideSpecDocAction({ session, repo, branch, fileListing, existin
   return decision;
 }
 
-async function selectFilesForSpecDoc({ session, repo, branch, treeDir, fileListing, diff }) {
-  const messages = buildSpecFileSelectionMessages({ repo, branch, fileListing, diff });
-  const reply = await runChatTurn({
-    session,
-    repo,
-    coNumber: branch.coNumber,
-    actingUserId: session.userId,
-    messages,
-    persistUserMessage: null,
-    replyRole: 'system',
-  });
+async function selectFilesForSpecDoc({ repo, treeDir, fileListing }) {
+  const reply = await chat(buildSpecFileSelectionMessages({ repo, fileListing }));
 
   const selected = parseFilesNeeded(reply);
   if (selected === null) {
@@ -99,8 +69,6 @@ async function selectFilesForSpecDoc({ session, repo, branch, treeDir, fileListi
     try {
       await fs.access(path.join(treeDir, relPath));
     } catch (err) {
-      // Same fail-closed treatment as Phase 4's code-gen file selection - a
-      // hallucinated path fails the run rather than being dropped or guessed.
       throw makeSpecDocError(
         `Model requested a file for the spec doc that does not exist in the working tree: ${relPath}`,
         'SPEC_DECISION_PARSE_FAILED'
@@ -110,17 +78,8 @@ async function selectFilesForSpecDoc({ session, repo, branch, treeDir, fileListi
   return selected;
 }
 
-async function generateSpecDocument({ session, repo, branch, fileListing, fileContents, diff }) {
-  const messages = buildSpecDocumentMessages({ repo, branch, fileListing, fileContents, diff });
-  const reply = await runChatTurn({
-    session,
-    repo,
-    coNumber: branch.coNumber,
-    actingUserId: session.userId,
-    messages,
-    persistUserMessage: null,
-    replyRole: 'system',
-  });
+async function generateSpecDocument({ repo, fileListing, fileContents }) {
+  const reply = await chat(buildSpecDocumentMessages({ repo, fileListing, fileContents }));
 
   const document = parseSpecDocument(reply);
   if (document === null) {
@@ -132,39 +91,32 @@ async function generateSpecDocument({ session, repo, branch, fileListing, fileCo
   return document;
 }
 
-// Returns { docType: null } when no regeneration is needed (the common case - most
-// sessions don't touch the API surface), or { docType, coNumber, content } ready for
-// pipelineService.js to persist via documentsService.upsertDocument, when one is.
-async function maybeBuildSpecDocChange({ session, repo, branch, treeDir, diff }) {
+// Regenerates repo's Spec/Communication Protocol doc from treeDir (trunk's current
+// state) and persists it. Returns true if a doc was written, false if the decision step
+// judged this repo has no API surface worth documenting (the doc, if any existed from a
+// time the repo did have one, is left as-is rather than deleted - a repo losing its API
+// surface is rare and worth a human noticing via a now-stale doc, not silent deletion).
+async function regenerateSpecDoc({ repo, treeDir }) {
   const fileListing = await listFilePaths(treeDir);
-  const existingDoc = await getDocument({
-    repoId: repo.id,
-    docType: DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL,
-    coNumber: branch.coNumber,
-  });
+  const existingDoc = await getDocument({ repoId: repo.id, docType: DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL });
 
-  const decision = await decideSpecDocAction({ session, repo, branch, fileListing, existingDoc, diff });
-  if (!decision.hasApiSurface || decision.docIsCurrent) {
-    logger.info('spec doc regeneration skipped', {
-      sessionId: session.id,
-      branchId: branch.id,
-      hasApiSurface: decision.hasApiSurface,
-      docIsCurrent: decision.docIsCurrent,
-    });
-    return { docType: null };
+  const decision = await decideSpecDocAction({ repo, fileListing, existingDoc });
+  if (!decision.hasApiSurface) {
+    logger.info('spec doc regeneration skipped: no API surface', { repoId: repo.id, repoName: repo.name });
+    return false;
   }
 
-  const selectedFiles = await selectFilesForSpecDoc({ session, repo, branch, treeDir, fileListing, diff });
+  const selectedFiles = await selectFilesForSpecDoc({ repo, treeDir, fileListing });
   const fileContents = {};
   for (const relPath of selectedFiles) {
     fileContents[relPath] = await fs.readFile(path.join(treeDir, relPath), 'utf-8');
   }
 
-  const content = await generateSpecDocument({ session, repo, branch, fileListing, fileContents, diff });
+  const content = await generateSpecDocument({ repo, fileListing, fileContents });
+  await upsertDocument({ repoId: repo.id, docType: DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL, content });
 
-  logger.info('spec doc regenerated', { sessionId: session.id, branchId: branch.id, coNumber: branch.coNumber });
-
-  return { docType: DOC_TYPES.SPEC_COMMUNICATION_PROTOCOL, coNumber: branch.coNumber, content };
+  logger.info('spec doc regenerated', { repoId: repo.id, repoName: repo.name });
+  return true;
 }
 
-module.exports = { maybeBuildSpecDocChange };
+module.exports = { regenerateSpecDoc };

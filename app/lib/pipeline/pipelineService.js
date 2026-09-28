@@ -4,11 +4,16 @@
 // declarative build/test config, two-step non-tool-calling code generation
 // against the model adapter, applying those changes to the working tree, a
 // sandboxed build/test run, and - only on success - pushing the code via
-// GitHub's Git Data API and then the Phase 5 delivery steps (requirements-log
-// append, conditional Spec/Communication Protocol doc regeneration),
-// persisted to Apex's own DB (documentsService.js) rather than committed to
-// the customer's repo, followed by releasing the CO's pipeline lock. Ends
-// with the session marked `completed`/`failed`.
+// GitHub's Git Data API and then the Phase 5 delivery step (requirements-log
+// append), persisted to Apex's own DB (documentsService.js) rather than
+// committed to the customer's repo, followed by releasing the CO's pipeline
+// lock. Ends with the session marked `completed`/`failed`.
+//
+// The Spec/Communication Protocol doc is NOT part of this per-session flow
+// (it no longer takes a dev branch, a diff, or a CO into account at all) -
+// see specDocScanService.js/specDocJobService.js/specDocService.js and
+// worker.js's specDocScanLoop for the trunk-staleness-driven flow that
+// replaced it.
 //
 // See roadmap.md's "Phase 4 - Sandboxed execution" and "Phase 5 - DEV branch
 // delivery" bullets for the scope this implements, and agent-prompts.md's
@@ -31,7 +36,6 @@ const { buildFileSelectionMessages, buildCodeChangesMessages, FILES_NEEDED_TAG, 
 const { parseFilesNeeded, parseFileChanges } = require('./pipelineResponseParsing');
 const { runSandbox } = require('./sandboxRunner');
 const { buildUpdatedRequirementsLog } = require('./requirementsLogService');
-const { maybeBuildSpecDocChange } = require('./specDocService');
 const { getDocument, upsertDocument, DOC_TYPES } = require('./documentsService');
 const { recordBlockedAllowlistAttempt } = require('../alerts/alertService');
 
@@ -92,10 +96,14 @@ async function createPipelineRun(sessionId) {
   return result.insertId;
 }
 
-async function finishPipelineRun(runId, { status, log, commitSha, specDocPath, errorMessage }) {
+// spec_doc_path is intentionally always NULL going forward - the Spec/Communication
+// Protocol doc is no longer generated as part of a session's pipeline run (see this
+// file's header comment), so there is nothing per-run to record here anymore. The
+// column itself stays in the schema for historical rows.
+async function finishPipelineRun(runId, { status, log, commitSha, errorMessage }) {
   await db.query(
-    `UPDATE pipeline_runs SET status = ?, log = ?, commit_sha = ?, spec_doc_path = ?, error_message = ?, finished_at = NOW() WHERE id = ?`,
-    [status, log || null, commitSha || null, specDocPath || null, errorMessage || null, runId]
+    `UPDATE pipeline_runs SET status = ?, log = ?, commit_sha = ?, error_message = ?, finished_at = NOW() WHERE id = ?`,
+    [status, log || null, commitSha || null, errorMessage || null, runId]
   );
 }
 
@@ -205,7 +213,6 @@ async function runPipelineForSession(sessionId) {
   // `try` block's scope.
   let sandboxResult = null;
   let commitSha = null;
-  let specDocPath = null;
 
   try {
     // Second of the two on-demand deletion checkpoints (the first is
@@ -277,16 +284,16 @@ async function runPipelineForSession(sessionId) {
     }
 
     // --- Phase 5: DEV branch delivery -------------------------------------
-    // Only reached once the sandboxed build/test has actually passed - never
-    // worth generating delivery docs for code that doesn't pass its own
-    // tests (see agent-prompts.md's "Phase 5" section). Both steps read the
-    // SAME treeDir the code changes were just applied to and validated in,
-    // but their outputs no longer ride along in the code's commit - they're
-    // persisted to Apex's own DB via documentsService.js below, once the
-    // code push has actually landed, so there is still no window where code
-    // lands without the requirements log (and, when applicable, the spec
-    // doc) being recorded, or vice versa - it just isn't a single git commit
-    // doing the guaranteeing anymore.
+    // Only reached once the sandboxed build/test has actually passed - never worth
+    // generating the requirements log entry for code that doesn't pass its own tests
+    // (see agent-prompts.md's "Phase 5" section). Reads the SAME treeDir the code
+    // changes were just applied to and validated in, but its output no longer rides
+    // along in the code's commit - it's persisted to Apex's own DB via
+    // documentsService.js below, once the code push has actually landed, so there is
+    // still no window where code lands without a requirements-log entry, or vice versa -
+    // it just isn't a single git commit doing the guaranteeing anymore. (The Spec/
+    // Communication Protocol doc used to be the other half of this step; it's now
+    // generated independently of any session - see this file's header comment.)
 
     const existingLog = await getDocument({ repoId: repo.id, docType: DOC_TYPES.REQUIREMENTS_LOG });
     const requirementsLogContent = buildUpdatedRequirementsLog({
@@ -296,18 +303,6 @@ async function runPipelineForSession(sessionId) {
       submittedBy: { username: session.username, initials: session.initials },
       requirements,
     });
-
-    // Model-judgment-gated: usually a no-op (most sessions don't touch the
-    // API surface). Any parse failure here (SPEC_DECISION_PARSE_FAILED /
-    // SPEC_DOCUMENT_PARSE_FAILED) throws and is caught by this function's
-    // catch block below, same as CODEGEN_PARSE_FAILED - a session whose code
-    // would otherwise have been fine can still end up `failed` if the
-    // model's spec-doc judgment call errors out. That is the intended,
-    // conservative behavior (see agent-prompts.md's "Phase 5" section), not
-    // a bug: this project never silently skips a delivery artifact just
-    // because generating it was hard.
-    const specDocResult = await maybeBuildSpecDocChange({ session, repo, branch, treeDir, diff });
-    specDocPath = specDocResult.docType;
 
     const commitMessage = buildCommitMessage({ coNumber: branch.coNumber, requirements });
     try {
@@ -338,18 +333,10 @@ async function runPipelineForSession(sessionId) {
       throw err;
     }
 
-    // Only once the code push has actually landed do the delivery docs get persisted -
+    // Only once the code push has actually landed does the delivery doc get persisted -
     // a failed push above throws before reaching here, so a run that didn't ship code
-    // never records a requirements-log entry or spec-doc update either.
+    // never records a requirements-log entry either.
     await upsertDocument({ repoId: repo.id, docType: DOC_TYPES.REQUIREMENTS_LOG, content: requirementsLogContent });
-    if (specDocResult.docType) {
-      await upsertDocument({
-        repoId: repo.id,
-        docType: specDocResult.docType,
-        coNumber: specDocResult.coNumber,
-        content: specDocResult.content,
-      });
-    }
 
     // Only once delivery is fully recorded does the pipeline release the
     // CO's pipeline lock - the first code in this whole project to call
@@ -360,22 +347,21 @@ async function runPipelineForSession(sessionId) {
     await releaseLock({ repoId: repo.id, coNumber: branch.coNumber });
 
     await markSessionCompleted(sessionId);
-    await finishPipelineRun(runId, { status: 'completed', log: sandboxResult.log, commitSha, specDocPath });
-    logger.info('pipeline completed', { sessionId, commitSha, specDocPath });
+    await finishPipelineRun(runId, { status: 'completed', log: sandboxResult.log, commitSha });
+    logger.info('pipeline completed', { sessionId, commitSha });
   } catch (err) {
     logger.error('pipeline run failed', { sessionId, error: err.message });
     await markSessionFailed(sessionId).catch(() => {});
-    // commitSha/specDocPath/sandboxResult.log are non-null here only in the
-    // rare edge case where the combined commit already succeeded but a step
-    // after it (releaseLock, markSessionCompleted) then failed - preserving
-    // them means the DB accurately reflects that code was pushed even though
-    // the run is still reported `failed` (the lock intentionally stays held
-    // in that case; see agent-prompts.md's "Phase 5" section).
+    // commitSha/sandboxResult.log are non-null here only in the rare edge case where the
+    // combined commit already succeeded but a step after it (releaseLock,
+    // markSessionCompleted) then failed - preserving them means the DB accurately
+    // reflects that code was pushed even though the run is still reported `failed` (the
+    // lock intentionally stays held in that case; see agent-prompts.md's "Phase 5"
+    // section).
     await finishPipelineRun(runId, {
       status: 'failed',
       log: sandboxResult ? sandboxResult.log : null,
       commitSha,
-      specDocPath,
       errorMessage: err.message,
     }).catch(() => {});
   } finally {

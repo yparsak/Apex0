@@ -273,3 +273,30 @@ CREATE TABLE IF NOT EXISTS repo_documents (
   FOREIGN KEY (repo_id) REFERENCES repos(id),
   UNIQUE (repo_id, doc_type, co_number)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Spec/Communication Protocol doc regeneration is no longer triggered by a DEV branch
+-- push and is no longer CO-scoped - see app/lib/pipeline/specDocScanService.js. It is
+-- now one doc per repo (repo_documents row with co_number='', the same sentinel the
+-- requirements log already uses), regenerated whenever `default_branch_name` moves.
+-- `spec_doc_synced_commit_sha` records the trunk commit the *current* doc reflects, so
+-- the scanner can tell "trunk moved since we last generated" without re-fetching the doc
+-- itself just to check staleness. NULL means no doc has ever been generated for this repo.
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS spec_doc_synced_commit_sha VARCHAR(64) NULL;
+
+-- The queue the trunk-staleness scan (specDocScanService.js) feeds and the worker
+-- (worker.js) drains, one row per regeneration attempt - same shape/discipline as
+-- `pipeline_runs` above. `trunk_commit_sha` is the commit this job is regenerating the
+-- doc for; on success it becomes `repos.spec_doc_synced_commit_sha`. A repo can only ever
+-- have one non-terminal (queued/running) job at a time - enforced by the scanner checking
+-- before inserting, not by a UNIQUE constraint, since completed/failed history for the
+-- same repo must be allowed to accumulate across many trunk commits over time.
+CREATE TABLE IF NOT EXISTS spec_doc_jobs (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  repo_id INT UNSIGNED NOT NULL,
+  status ENUM('queued', 'running', 'completed', 'failed') NOT NULL DEFAULT 'queued',
+  trunk_commit_sha VARCHAR(64) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TIMESTAMP NULL,
+  error_message TEXT NULL,
+  FOREIGN KEY (repo_id) REFERENCES repos(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
