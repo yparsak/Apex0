@@ -44,6 +44,11 @@ class NvidiaNimAdapter extends ModelAdapter {
     }
 
     let lastFinishReason = 'unknown';
+    // Set only when the most recent attempt failed at the transport level (network error
+    // or a non-2xx HTTP status) rather than returning blank/degenerate content - lets the
+    // final throw below report the real failure instead of a misleading "no usable
+    // content" message when every attempt actually never got a usable response at all.
+    let lastTransportError = null;
 
     for (let attempt = 1; attempt <= EMPTY_CONTENT_RETRIES + 1; attempt++) {
       let response;
@@ -59,17 +64,26 @@ class NvidiaNimAdapter extends ModelAdapter {
       } catch (err) {
         // Node's fetch (undici) collapses every network-level failure - DNS, connection
         // reset, or its own default ~300s headers/body timeout - into a generic
-        // "fetch failed" TypeError, with the actual reason only on `err.cause`. Without
-        // surfacing that here, every caller's logs (e.g. worker.js's "spec doc job
-        // failed") only ever show "fetch failed", which is nearly useless for telling a
-        // slow/hung model response apart from an actual network outage.
+        // "fetch failed" TypeError, with the actual reason only on `err.cause`. Surfaced
+        // here so callers' logs (e.g. worker.js's "spec doc job failed") show the real
+        // reason instead of just "fetch failed".
         const cause = err.cause ? ` (${err.cause.code || err.cause.message || err.cause})` : '';
-        throw new Error(`NVIDIA NIM chat request errored${cause}: ${err.message}`);
+        lastTransportError = new Error(`NVIDIA NIM chat request errored${cause}: ${err.message}`);
+        // Retryable, same as the blank/degenerate-content case below: the adapter's own
+        // file comment above documents kimi-k3's NIM backend as intermittently and
+        // sporadically broken, and a hang severe enough to trip fetch's own headers/body
+        // timeout is that same server-side flakiness manifesting as a transport failure
+        // instead of a blank/garbage reply - not a reason to give up on the first
+        // attempt when there's retry budget left.
+        logger.warn('NVIDIA NIM request errored at the transport level, retrying', { attempt, error: lastTransportError.message });
+        continue;
       }
 
       if (!response.ok) {
         const detail = await response.text();
-        throw new Error(`NVIDIA NIM chat request failed (${response.status}): ${detail}`);
+        lastTransportError = new Error(`NVIDIA NIM chat request failed (${response.status}): ${detail}`);
+        logger.warn('NVIDIA NIM request failed, retrying', { attempt, status: response.status });
+        continue;
       }
 
       const data = await response.json();
@@ -85,12 +99,15 @@ class NvidiaNimAdapter extends ModelAdapter {
         return { content };
       }
 
+      lastTransportError = null; // a real (if unusable) response arrived - not a transport failure
       logger.warn('NVIDIA NIM returned empty or degenerate content, retrying', {
         attempt,
         finishReason: lastFinishReason,
         contentPreview: isBlank(content) ? '' : content.slice(0, 80),
       });
     }
+
+    if (lastTransportError) throw lastTransportError;
 
     // Fail loudly rather than letting a null/garbage reply through to
     // sessionService's recordConversation (null hits the DB's NOT NULL

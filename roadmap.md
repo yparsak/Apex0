@@ -1,6 +1,33 @@
-# AI Code-Change Agent — Project Roadmap
+# Apex — Project Roadmap
+
+Status as of 2026-09-28. Apex is an internal tool that lets multiple authenticated
+engineers drive an AI agent against a shared set of GitHub repos to implement a Change
+Order (CO). **The agent's only Git output is a DEV branch** — it never opens a PR and
+never merges. Everything downstream (TEST branch, PR, merge to `main`) is human-owned
+and outside this tool.
+
+All phases originally scoped (0–7, below) are implemented and merged. This document is
+now a status record, not a forward plan: what shipped, what shipped afterward that
+wasn't in the original phase list, what's in progress, and what's still genuinely open.
+
+## Regulatory context (load-bearing, not a footnote)
+
+CO numbers originate in a regulated change-control / quality system. This document does
+not constitute regulatory or compliance guidance — QA/RA sign-off is a separate process
+and hasn't happened via this document.
+
+Because the AI's output stops at a DEV branch, and every regulated-adjacent action
+(review, test, PR, merge) happens through the existing human-driven process, the AI
+itself sits outside the formal approval chain. That materially reduces (but does not
+eliminate) exposure to electronic-record/signature requirements and
+segregation-of-duties concerns for *this tool specifically* — those requirements still
+apply to whatever already governs the TEST → PR → main process today. See
+[docs/human-judgment-reliance.md](docs/human-judgment-reliance.md) for the fuller
+internal note on why this project leans on human review at every judgment point rather
+than trying to make the AI's judgment authoritative.
 
 ## Layout
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Apex                                                          [ Login ]    │  ← top nav bar
@@ -17,125 +44,194 @@
 └───────────────┴─────────────────────────────────────────────────────────────┘
 ```
 
-**Selection flow:** repo list → select a repo → active-branch list for that repo (excludes branches marked `deleted` — see below) → user either selects an existing branch to continue, or requests the next available branch name to start new work.
+**Selection flow:** repo list → select a repo → active-branch list for that repo
+(excludes branches marked `deleted`) → user either selects an existing branch to
+continue, or requests the next available branch name to start new work.
 
-## Scope (final, as decided)
+## How it works today
 
-- Node.js backend, MariaDB.
-- Simple username/password auth for v1, built behind an interface so SSO can be swapped in later without touching call sites.
-- Multiple authenticated users share one AI agent.
-- **The agent's only Git output is a DEV branch — it creates or updates a branch for a given Change Order (CO). It does not create a pull request and does not merge.**
-- Everything downstream of DEV is entirely human-owned and outside this tool: engineers review the DEV branch, manually create a TEST branch, run testing procedures, and open the PR from TEST into the default branch themselves.
-- Model-agnostic: the agent's model backend must be swappable (NVIDIA NIM-hosted model for prototyping, any other provider for production) without rewriting agent logic.
+- **Auth:** username/password (bcrypt), server-side sessions, built behind an
+  `authProvider` interface (`app/lib/auth/`) so SSO can be swapped in later without
+  touching call sites. SSO itself hasn't been built — see "Open / future" below.
+- **Branch naming:** `dev/{initials}-{CO}-{n}`, e.g. `dev/YP-C12345678-1`. Increment is
+  scoped to `(initials, co_number)`, not `(repo_id, co_number)` — a user's first branch
+  on any CO is always `-1`, independent of other users. Two different users can each
+  hold a `-1` branch for the same CO; this is a deliberate parallel-branches model, not
+  an oversight (see Accepted Risks #7).
+- **GitHub access:** one org-wide GitHub App installation, `contents: write` only,
+  scoped to the `dev/**` ref pattern via a repository ruleset. No `pull_requests` scope,
+  no merge capability — the app has strictly less access than a PR-capable tool would
+  need. Never force-pushes; on non-fast-forward it fetches and retries against current
+  remote state or fails loudly, since engineers may push directly to the same DEV branch.
+- **Locking:** one AI session at a time per `(repo_id, co_number)`, covering the full
+  pipeline (clone → sandbox build/test → push), not just the push. A push-only lock would
+  let two sandboxes build against stale state and race.
+- **Model backend:** pluggable via `app/lib/model/modelAdapter.js`. Currently NVIDIA
+  NIM (`moonshotai/kimi-k3`), config-only via `MODEL`/`NVIDIA_BASE_URL`/
+  `MODEL_MAX_TOKENS`. The adapter retries on blank/degenerate model replies and falls
+  back to a `reasoning_content` field when the model returns one instead of `content`
+  — see "In progress" below for the current reliability work on this adapter.
+- **Sandbox execution:** ephemeral container, declarative per-repo `apex.pipeline.json`
+  (`buildCommand`/`testCommand`/`image`) at the repo root — the runner never invents a
+  default command. Clone uses a scoped, clone-only token; the write-capable token never
+  enters the sandbox.
+- **Explicit human approval gate:** a session only becomes eligible for the background
+  worker to pick up after the user clicks **Approve & Implement**. It's *offered* once
+  every submitted requirement has resolved out of `pending_confirm` (i.e. any
+  duplicate/overlap flags have been confirmed or overridden), but nothing runs until
+  that explicit click flips the session to `queued`. If new instructions or a fresh
+  overlap check reopen a requirement afterward, the session drops back out of
+  `queued`/approved state automatically and needs to be re-approved — approval is never
+  "locked in" once given.
+- **Async pipeline:** decoupled from the browser session. `worker.js` polls for queued
+  sessions; completion is surfaced next time the user views that repo's branch list, no
+  separate notification channel.
+- **Retry on failure:** the retry action re-queues the *same* session row (conditional
+  `UPDATE ... WHERE status = 'failed'`) — it is a full from-scratch re-run (codegen,
+  sandbox build/test, push), not a resume-from-checkpoint. Nothing from the failed
+  `pipeline_runs` row is reused.
+- **Delivery docs are Apex-owned, not committed to the branch** (see "Since Phase 7"
+  below) — this is the one place the original phase plan changed after the fact.
 
-This is a deliberately smaller scope than the original ask — the agent no longer touches PR creation or merge at all. That's a real reduction in what the tool is responsible for, not just an implementation detail.
+## Data model (current)
 
-## Regulatory context (load-bearing, not a footnote)
+- `users` — includes `initials` (branch naming) and `is_admin` (Phase 6 gate)
+- `orgs`, `repo_groups`, `repos` (per-repo `default_branch_name`,
+  `spec_doc_synced_commit_sha`), `user_repo_group_permissions`
+- `change_orders` — unique on `(repo_id, co_number)`
+- `branches` — unique on `(repo_id, initials, co_number, increment)`, `active`/`deleted`
+- `sessions` — `awaiting_approval` / `queued` / `running` / `completed` / `failed`,
+  scoped per user per branch
+- `session_requirements` — per-item `overlap_flag_requirement_id` +
+  `pending_confirm`/`confirmed_proceed`/`confirmed_skip`
+- `conversations`, `audit_log` — Q&A and raw-instruction history for the AI pipeline
+- `pipeline_locks` — row existence *is* the `(repo_id, co_number)` lock
+- `pipeline_runs` — one row per worker pickup attempt, captured build/test log,
+  `commit_sha`, `spec_doc_path`
+- `admin_audit_log` — every Phase 6 admin mutation (permission grant/revoke, initials
+  edit), separate from `audit_log` since the shape doesn't fit
+- `blocked_allowlist_alerts` — a GitHub write call came back HTTP 403 (App-permission
+  or ruleset violation)
+- `lock_contention_events` — one row per genuine cross-user lock contention on the same
+  `(repo, CO)`
+- `repo_documents` — Apex-owned delivery docs (requirements log,
+  Spec/Communication Protocol), one row per `(repo, doc_type, co_number)`,
+  `co_number=''` as the sentinel for the repo-level (not per-CO) case
+- `spec_doc_jobs` — queue the trunk-staleness scanner feeds and `worker.js` drains
 
-Change Order numbers originate in a regulated change-control / quality system. The design decisions below were made with that in mind, but this document does not constitute regulatory or compliance guidance — QA/RA sign-off is still required and has not happened via this conversation.
+## Shipped: Phases 0–7 (all complete)
 
-Because the AI's output stops at a DEV branch, and every regulated-adjacent action (review, test, PR, merge) happens through your existing human-driven process, the AI itself sits outside the formal approval chain. That materially reduces (but does not eliminate) exposure to electronic-record/signature requirements and segregation-of-duties concerns for *this tool specifically* — those requirements still apply to whatever already governs your TEST → PR → main process today.
+Detailed manual test procedures for each phase live in [test-docs/](test-docs/)
+(`Phase1_test.md` through `Phase7_test.md`); Phase 0 setup steps are in
+[docs/Phase0_setup.md](docs/Phase0_setup.md).
 
-## Confirmed architecture decisions
+- **Phase 0 — Foundations.** Schema, username/password auth, `Makefile` `setup` target,
+  setup doc.
+- **Phase 1 — Platform integrations.** GitHub App token-minting service (short-lived
+  tokens, never persisted); model adapter interface.
+- **Phase 2 — Repo/branch selection.** On-demand GitHub existence check before rendering
+  a branch list (marks missing branches `deleted`); CO format validation
+  (`^C[0-9]{8}$`); new-branch-from-`main`; pipeline lock acquisition.
+- **Phase 3 — Clarification loop.** LLM-driven Q&A against repo context via the GitHub
+  API, written to `audit_log`; new requirements checked against already-implemented work
+  on the branch, with a pause for the submitting user to confirm/override on any
+  detected overlap — no auto-skip.
+- **Phase 4 — Sandboxed execution.** Ephemeral, network-isolated container; declarative
+  `apex.pipeline.json`; fetch-and-retry on push; branch-existence re-check at session
+  start; async worker execution.
+- **Phase 5 — DEV branch delivery.** Combined commit (code + requirements log + spec doc
+  when applicable); the **Approve & Implement** human gate; retry-on-failure. The
+  Spec/Communication Protocol doc was reworked mid-phase into a repo-scoped,
+  trunk-staleness-driven background job rather than a per-session artifact (see
+  `specDocScanService.js`, `specDocJobService.js`, `specDocService.js`) — already
+  reflected in how it's described above.
+- **Phase 6 — Access administration.** Admin UI for `user_repo_group_permissions` and
+  user `initials`, itself audit-logged (`admin_audit_log`).
+- **Phase 7 — Observability & hardening.** Blocked-allowlist alerts and a lock-contention
+  dashboard are both real, queried admin-UI surfaces (`GET /api/admin/alerts`,
+  `/api/admin/locks`, `/api/admin/lock-contention`), not write-only tables. Also:
+  [docs/github-app-key-rotation.md](docs/github-app-key-rotation.md) and
+  [docs/human-judgment-reliance.md](docs/human-judgment-reliance.md).
 
-| Decision | Rationale / Risk accepted |
-|---|---|
-| Single shared bot GitHub identity (one org-wide GitHub App installation) | Simpler than per-user OAuth; blast radius mitigated by minimal permission scope, not by identity model |
-| GitHub App permissions: `contents: write` only, scoped to a DEV-branch naming pattern. No `pull_requests`, no merge. | Since the AI never creates a PR, it needs strictly less access than originally planned |
-| **Branch naming: `dev/{initials}-{CO}-{n}`**, e.g. `dev/YP-C12345678-1` | Fixed format, human-readable owner + CO + increment. Replaces the earlier `CO#######` / `CO#######-2` scheme entirely — do not mix the two. Confirmed final — the earlier `JOHN.C12345678-1` example was illustrative shorthand only, not an alternate format. |
-| **User initials stored per-user in `users` table**, used to populate `{initials}` at branch-creation time | Avoids re-typing initials per branch; if initials change, historical branch names do not retroactively update |
-| **CO number format validated client/server-side against `^C[0-9]{8}$`** | Format-only validation. **Does not** validate against the actual change-control/QMS system — see Accepted Risks #1, which still stands. Confirmed acceptable: merge to `main` is where correctness responsibility actually lives. |
-| **Increment scoped to `(initials, co_number)`, not `(repo_id, co_number)`** — a given user's first branch on any new CO is always `-1`, independent of what else that user has created | Confirmed. Two different users can each hold a `-1` branch for the same CO under their own initials — a parallel-branches-per-CO model. Confirmed as intentional: whether to coordinate on one branch or work in parallel and reconcile at TEST/PR is a human decision outside this tool's scope (see Accepted Risks #7). The UI must surface existing active branches for a CO clearly at the point of choice, so the decision is actually informed. |
-| Lock granularity: `(repo_id, co_number)`, not repo-wide | Different COs on the same repo don't block each other; matches actual conflict boundary |
-| Lock scope: entire pipeline (clone → sandbox build/test → push), one AI session at a time per CO | A push-only lock would allow two sandboxes to build against stale state and race on push |
-| **DEV branch always cloned from `main`** | Confirmed: `main` is the production-equivalent, latest-version branch. Earlier reference to `master` in this roadmap was incorrect and is corrected here. |
-| **User selects any existing active branch (regardless of whose initials created it) to continue, or requests "next available branch name" under their own initials to create new** | Preserves the collaborative, no-ownership model at the selection level even though creation numbering is per-user (see increment row above). |
-| **Branch status tracked in local DB (`active` / `deleted`)**, validated by **on-demand GitHub API check** — not a standing poll or webhook | Checked at two points: (1) when rendering a repo's active-branch list, (2) at session start before work begins. If GitHub reports the branch missing, mark `deleted` in the DB immediately, exclude from the list and from "next available" numbering. Avoids standing background-job infrastructure; trade-off is a bounded staleness window between renders, which self-corrects on next view and never affects an in-flight write since it's re-checked at session start. |
-| AI never force-pushes; on non-fast-forward, fetch and retry against current remote state or fail loudly | Engineers push directly to the same DEV branch — a force-push would silently destroy manual work with no error |
-| Spec / Communication Protocol doc **auto-generated specifically when the branch's code exposes an API surface and no protocol doc currently reflects it**, regenerated from full current branch state (not diff-only), committed as a file inside the DEV branch | Must reflect the cumulative API surface across multiple sessions/contributors; travels with the code into TEST and the eventual PR. Distinct from the requirements log below — this one is agent-authored from code analysis, not user-authored. |
-| **User requirements log**: separate MD file per branch, append-only, organized under a heading per CO number | **Distinct artifact from the Spec/Communication Protocol doc above**, confirmed. Raw chronological record of what was asked, authored from user input. If the file doesn't exist yet on the branch, create it; if it exists, append a new section under the current CO's heading rather than overwriting. |
-| **Active-branch list: CO-filtered first, ownership as a secondary toggle, sorted/filterable by CO number** | Once a CO is entered, show every active branch matching it across all users, owner badge on each, with a mine/others toggle (or tab — implementation detail, either is fine) as a secondary filter inside that view. Ownership is not the primary split; CO match is, so an existing same-CO branch surfaces regardless of who created it, before a user chooses to create new. Default list sort is by CO number; a CO filter/search box is available independent of entering a CO to create against. Sort can be plain lexicographic string sort — safe only because CO format is fixed-length (`C` + exactly 8 digits per `^C[0-9]{8}$`); if that format ever becomes variable-length, lexicographic sort will silently misorder and this needs revisiting alongside the regex. |
-| **Model backend for prototyping: NVIDIA NIM at `https://integrate.api.nvidia.com/v1`, `MODEL=meta/llama-3.1-70b-instruct`**, both as config values (`NVIDIA_BASE_URL`, `MODEL`) | Confirmed: model swaps *within* the NIM catalog are config-only. Swapping to a different API shape (Anthropic, OpenAI direct, self-hosted) is explicitly allowed to require a code change — the requirement is that the adapter interface isolates provider-specific details (auth, request/response shape, tool-calling schema) so that a future switch is a contained change inside the adapter, not a rewrite touching agent logic elsewhere. |
-| **Pipeline execution decoupled from the live browser session** — once requirements are submitted/approved, a background worker processes the job independently; user does not need to keep the tab open | Requires a job queue + worker process (not just extending an HTTP session timeout). Completion is surfaced via a status flag on the session, tied to its branch, checked when the user next views that repo's branch list (Phase 2 UI) — no separate notification channel (email/push) is needed. |
-| **Each user gets their own session against a shared branch; sessions are visible to other users on that branch, not merged into one queue** | Revises the earlier "single merged pending list" design. A submits requirements 1,2,3 in her session; B can see that. When B later submits his own session with 3,4, the agent diffs B's ask against what's already implemented and flags overlap — but does **not** auto-resolve it. |
-| **On detected duplicate/overlap with already-implemented work, the agent pauses and requires the submitting user to confirm or override before proceeding** — no auto-skip | Confirmed. Duplicate detection here is a semantic judgment call by the LLM, not a deterministic match — it can misjudge in both directions (missing a real duplicate, or wrongly flagging two different asks as the same). Auto-skip on a wrong judgment silently drops a real requirement with no visibility; pausing for confirm/override puts a human in the loop at exactly the point the AI's judgment is least reliable, consistent with how this roadmap already treats CO validity, branch reuse, and spec staleness — all backstopped by human review, not system certainty. Only item 4 proceeds without prompting in the example; item 3 waits on B's confirmation. |
-| Trunk-based branching, `main` as production-equivalent | Confirmed, no longer an open question. |
+## Since Phase 7 (shipped, not in the original phase plan)
+
+- **Delivery docs moved out of the branch entirely.** The original plan had the
+  requirements log and Spec/Communication Protocol doc committed as files inside the DEV
+  branch. That's no longer true: both now live in Apex's own `repo_documents` table and
+  are browsable/downloadable from a **Documents UI** — a per-repo view
+  (`app/routes/repos.js`) plus a global, CO-scoped cross-repo search
+  (`app/routes/documents.js`, `documentsService.js`) answering "every delivery doc for
+  this CO, across every repo I can access." A user who wants either doc physically in
+  their repo now adds it by hand. The requirements log itself is also no longer
+  per-branch — it's one cumulative record per repo, organized internally by a heading
+  per CO, the same way it always was, just DB-stored instead of file-per-branch.
+- **User Maintenance admin screen** — a dedicated UI (`user-maintenance.ejs`,
+  `create-user` script/route) alongside the Phase 6 permissions/initials admin UI.
+- **Retry button for failed sessions** — see "Retry on failure" above.
+- **Model reliability hardening** — retry on empty/degenerate NVIDIA NIM replies,
+  `reasoning_content` fallback, `MODEL_MAX_TOKENS` made configurable, and a fix for
+  responses that hit MariaDB's `NOT NULL` constraint or the fenced-block parser instead
+  of failing loudly upstream.
+
+## In progress
+
+- **`nvidiaNimAdapter.js` transport-vs-content failure fix** (uncommitted,
+  `git diff app/lib/model/nvidiaNimAdapter.js`). Currently, a network-level error or
+  non-2xx HTTP status throws immediately without exhausting the retry budget the
+  empty/degenerate-content case already gets, and — more importantly — if every retry
+  attempt fails at the transport level, the final error message misleadingly reports "no
+  usable content" instead of the real transport failure. The in-flight change makes
+  transport failures retry like content failures do, while preserving the specific
+  transport error for the final throw when retries are exhausted.
+
+## Open / future considerations
+
+Nothing here is blocking; these are the genuinely undecided or unbuilt items, as
+distinct from the "Accepted risks" below (which are known trade-offs already made, not
+open questions):
+
+- **SSO.** The `authProvider` interface exists specifically to make this swappable, but
+  no second provider has been built — v1 is username/password only.
+- **Non-NIM model provider.** The adapter interface isolates provider-specific request/
+  response shape and auth, but switching to a different API shape (Anthropic, OpenAI
+  direct, self-hosted) is an explicit code change inside the adapter, not yet exercised
+  in practice. Model swaps *within* the NIM catalog are config-only today.
+- **Branch-deletion staleness window.** Detection is on-demand (branch-list render,
+  session start), not a standing poll/webhook — see Accepted Risk #5. Revisit toward a
+  webhook only if usage shows real collisions.
+- **Per-repo build/test config format.** `apex.pipeline.json` is intentionally plain
+  JSON (no YAML dependency for one config file); revisit only if a real need for
+  richer config emerges.
 
 ## Accepted risks (explicit — for your own audit trail)
 
-1. **CO validity is not system-enforced against the change-control system.** Format is now validated (`^C[0-9]{8}$`), which catches typos in shape but not invalid or non-existent CO numbers. Mitigation remains multi-stage human review (DEV, TEST, PR) — format validation is not a substitute for that.
-2. **Branch reuse decision is human judgment, not system-derived state.** The app shows metadata (last touched, open PR) but does not know for certain whether a CO has shipped. Wrong calls are possible.
-3. **Spec doc can go stale silently.** A human editing the DEV branch directly, without triggering an AI session, will not regenerate the spec doc. Nothing currently detects or flags this.
-4. **Audit log is an internal engineering record, not a Part 11-controlled electronic record.** This is only appropriate because the AI sits outside the regulated approval chain — if that scope ever expands (e.g., the AI is later given PR or merge authority), this needs to be revisited with QA/RA.
-5. **Branch-deletion detection has a bounded staleness window, not none.** Since existence is checked on-demand (branch-list render, session start) rather than via standing poll/webhook, the DB can show a branch as `active` between checks even though it was deleted on GitHub. This self-corrects the next time anyone views that repo's branch list or starts a session against it, and never reaches an in-flight write, since session start re-checks before work begins. Acceptable given usage patterns; would need revisiting if branches are deleted and immediately re-referenced by a second user before anyone reloads the list.
-6. **Two living documents per branch (requirements log + Spec doc) can drift from each other.** They're updated by different triggers (every session appends to the log; the Spec doc regenerates from branch state, and only when an API surface is detected). If someone edits the branch outside an AI session, the requirements log won't reflect that change either — same underlying gap as risk #3, now duplicated across two files instead of one.
-7. **Parallel per-user branches on the same CO are a deliberate, accepted design choice, not an oversight.**
-8. **Duplicate/overlap detection between users' sessions is a semantic judgment, not a guarantee.** The agent can misjudge in either direction — missing a real duplicate, or wrongly flagging two distinct asks as the same. The confirm/override pause (Phase 3) is the mitigation: a human always makes the final call before an item is skipped or proceeds, so a wrong LLM judgment gets caught rather than silently executed. Because branch-creation increments are scoped to `(initials, co_number)` rather than `(repo_id, co_number)`, two users can independently create a `-1` branch for the identical CO. Whether to coordinate and share one branch, or work in parallel and resolve conflicts at TEST/PR time, is confirmed as a human decision outside this tool's scope — consistent with the existing scope boundary that everything downstream of DEV (including conflict resolution) is human-owned. The tool's only obligation is to surface existing active branches for that CO clearly enough, at the point of choice, that the decision is actually informed rather than accidental — burying that information in the UI would undermine this being a real choice.
-
-## Data model (Phase 0)
-
-- `users` — includes stored `initials` field for branch naming
-- `orgs`
-- `repo_groups`
-- `repos` — includes `default_branch_name` (do not hardcode `main`/`master` assumption globally; store per repo)
-- `user_repo_group_permissions`
-- `change_orders` — unique constraint on `(repo_id, co_number)`, status tracking
-- `branches` — unique on `(repo_id, initials, co_number, increment)`, status enum (`active`/`deleted`), last-checked timestamp
-- `sessions` — add `status` (`queued`/`running`/`completed`/`failed`) and `completed_at`, decoupled from any live HTTP connection; scoped per user per branch, not merged across users
-- `session_requirements` — per session, `content`, `submitted_at`; each item can carry an `overlap_flag` referencing an earlier session/item it was judged to duplicate, plus resolution status (`pending_confirm`/`confirmed_proceed`/`confirmed_skip`)
-- `conversations`
-- `audit_log` — user, repo, CO, raw instructions, Q&A history, timestamps
-
-## Phases
-
-**Phase 0 — Foundations**
-- Schema above, including `branches` table and per-user `initials`.
-- Auth: username/password, bcrypt/argon2, server-side sessions.
-- `Makefile` with an initial-setup target (create the database, apply the schema, seed anything required to run locally).
-- `SETUP.md` documenting the exact steps to go from a clean checkout to a running local environment (prerequisites, env vars, `make` targets to run and in what order).
-
-**Phase 1 — Platform integrations**
-- GitHub App: org-wide install, `contents: write` only, scoped to DEV-branch pattern. Private key in a secrets manager. Token-minting service issues short-lived tokens on demand, never persists them.
-- Model adapter interface (see `agent-prompts.md`) so the model backend is swappable.
-
-**Phase 2 — Repo/branch selection & resolution**
-- User selects a repo. Before rendering the active-branch list, check each candidate branch against GitHub; mark any missing branch `deleted` in the DB and exclude it from the list.
-- Branch list also surfaces the status of the current user's own session on each branch (`queued`/`running`/`completed`/`failed`) — this is how a user finds out a background job finished after stepping away, with no separate notification channel.
-- User enters CO number — validated against `^C[0-9]{8}$` format only, no external system check.
-- User chooses: continue on any existing active branch (any user's), or request the next available branch name under their own initials (`dev/{initials}-{CO}-{n}`, next unused `n` for that user+CO pair).
-- New branch is cloned from `main`.
-- Lock acquired on `(repo_id, co_number)` for the full pipeline.
-
-**Phase 3 — Clarification loop**
-- On an existing branch, agent summarizes current diff + relevant `audit_log` history before taking new instructions.
-- LLM-driven Q&A against repo context via GitHub API. Every exchange written to `audit_log`.
-- Requirements are scoped to the submitting user's own session, not merged into a shared branch-wide list. Other users' sessions on the same branch are visible for context.
-- Before proceeding, the agent checks new requirements against already-implemented work on the branch. Any item judged a likely duplicate is flagged and the session **pauses** for the submitting user to confirm ("still want this addressed") or override (skip it) — no auto-skip. Only non-overlapping items proceed without prompting.
-
-**Phase 4 — Sandboxed execution**
-- Ephemeral, network-isolated container. Clone via a scoped, clone-only token — the write-capable token never enters the sandbox.
-- Declarative per-repo build/test config.
-- Fetch-and-retry (never force-push) on non-fast-forward.
-- **Branch-existence check on session start**: verify the target branch still exists on GitHub before beginning work; if not, mark `deleted` in the `branches` table and halt with a clear error rather than pushing into a stale branch name. This is the second of the two on-demand checkpoints (the first being branch-list render in Phase 2) — no standing poll or webhook.
-- **Runs as an async background job**, not tied to the initiating browser session. A worker processes the pipeline once requirements are approved (including any overlap confirm/override); `sessions.status` moves `queued` → `running` → `completed`/`failed` independent of whether the user's tab is open. Since sessions are per-user, the branch-level lock still serializes execution one session at a time.
-
-**Phase 5 — DEV branch delivery**
-- Push/update DEV branch. No PR, no merge.
-- Append user requirements to the branch's requirements log MD file under a heading for the current CO; create the file if it doesn't exist.
-- Downstream (TEST, PR-to-main) explicitly out of scope for this tool.
-- **Spec/Communication Protocol doc — reworked, no longer part of this per-session flow.** It is not CO-scoped and does not reflect any branch's diff: one doc per repo, describing only the current state of `default_branch_name` (main/master), regenerated whenever trunk moves. `worker.js` runs two loops: a slow periodic scan across every repo in the system comparing trunk's latest commit against the commit the repo's current doc reflects, enqueueing a job (`spec_doc_jobs`) when they differ; and the existing fast session-poll loop, which now also drains that queue. See `app/lib/pipeline/specDocScanService.js`, `specDocJobService.js`, and `specDocService.js`.
-
-**Phase 6 — Access administration**
-- Admin UI for `user_repo_group_permissions`, itself audit-logged.
-- Admin UI for setting/editing user `initials`.
-
-**Phase 7 — Observability & hardening**
-- Deletion detection is handled inline (Phase 2 list-render + Phase 4 session-start checks) — no standing job to build or monitor here. If usage patterns later show the staleness window in Accepted Risks #5 causing real collisions, revisit toward a webhook.
-- Alerts on blocked-allowlist attempts.
-- GitHub App key rotation process.
-- Lock-contention dashboard on `(repo, CO)`.
-- Written internal note on the human-judgment-reliance philosophy (accepted risks above), so it's on record rather than discovered later.
-
-## Still open (not blocking Phase 0)
-
-None currently — all items raised through this round of revisions are reflected as confirmed decisions above. Anything new (e.g. specific per-repo build/test config format, admin-UI details for Phase 6) will get added here as it comes up.
+1. **CO validity is not system-enforced against the change-control system.** Format is
+   validated (`^C[0-9]{8}$`), which catches typos in shape but not invalid or
+   non-existent CO numbers. Mitigation remains multi-stage human review (DEV, TEST, PR).
+2. **Branch reuse decision is human judgment, not system-derived state.** The app shows
+   metadata (last touched) but does not know for certain whether a CO has shipped.
+3. **Delivery docs can go stale silently, and no longer travel with the branch.** A
+   human editing the DEV branch directly, without triggering an AI session, won't update
+   the requirements log. The Spec/Communication Protocol doc self-heals on its own
+   schedule (regenerated whenever trunk moves — see `specDocScanService.js`), but since
+   both docs now live in Apex's own DB rather than in the repo (see "Since Phase 7"),
+   anyone who needs either doc downstream (TEST, PR, or outside Apex entirely) has to
+   pull it from the Documents UI themselves — it doesn't arrive for free with the branch
+   the way it briefly did in the original design.
+4. **Audit log is an internal engineering record, not a Part 11-controlled electronic
+   record.** Only appropriate because the AI sits outside the regulated approval chain —
+   if that scope ever expands (e.g. PR or merge authority), revisit with QA/RA.
+5. **Branch-deletion detection has a bounded staleness window, not none.** Checked
+   on-demand (branch-list render, session start) rather than via standing poll/webhook.
+   Self-corrects on next view/session start; never reaches an in-flight write.
+6. **Parallel per-user branches on the same CO are a deliberate, accepted design choice,
+   not an oversight.**
+7. **Duplicate/overlap detection between users' sessions is a semantic judgment, not a
+   guarantee.** The agent can misjudge in either direction. The confirm/override pause
+   is the mitigation — a human always makes the final call before an item is skipped or
+   proceeds.
+8. **"403 means allowlist block" is a heuristic, not a GitHub guarantee.** GitHub
+   surfaces 403 both for an App-permission scope violation and for the `dev/**` ruleset
+   rejecting an out-of-pattern ref; `blocked_allowlist_alerts` records the fact of a 403,
+   not a certified root cause. A 422/409 non-fast-forward push is a separate,
+   already-handled retry case and never reaches this table.
